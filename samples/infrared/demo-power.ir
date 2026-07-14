@@ -1,0 +1,8 @@
+Filetype: IR signals file
+Version: 1
+#
+name: demo_power
+type: parsed
+protocol: NEC
+address: DF 20 00 00
+command: EF 10 00 00

@@ -1,0 +1,1 @@
+{"template-id":"http-missing-security-headers","info":{"name":"Missing security headers","severity":"medium","description":"One or more recommended HTTP response headers are absent."},"host":"https://example.test","matched-at":"https://example.test/","ip":"192.0.2.10","matcher-name":"headers"}

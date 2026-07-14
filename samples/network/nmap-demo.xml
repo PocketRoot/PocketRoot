@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<nmaprun scanner="nmap">
+  <host>
+    <status state="up"/>
+    <address addr="192.0.2.10" addrtype="ipv4"/>
+    <hostnames><hostname name="demo.example"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open"/>
+        <service name="https" product="Example service" version="1.0"/>
+        <script id="ssl-cert" output="Local sample metadata only"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>

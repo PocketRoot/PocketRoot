@@ -1,0 +1,5 @@
+REM PocketRoot read-only review sample
+ID 1209:0001 PocketRoot:Audit
+DEFAULT_DELAY 50
+STRINGLN PocketRoot audit sample
+WAIT_FOR_BUTTON_PRESS
