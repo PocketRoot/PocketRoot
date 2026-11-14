@@ -43,8 +43,8 @@ pub fn decodeRequest(frame_bytes: []const u8) !WireRequest {
     const frame = try ipc.decode(frame_bytes);
     if (frame.kind != .request) return error.UnexpectedFrameKind;
     if (frame.payload.len < command_header_size) return error.TruncatedCommand;
-    const kind = std.meta.intToEnum(capability.Kind, frame.payload[0]) catch return error.InvalidCapabilityKind;
-    const operation = std.meta.intToEnum(capability.Operation, frame.payload[1]) catch return error.InvalidOperation;
+    const kind = std.enums.fromInt(capability.Kind, frame.payload[0]) orelse return error.InvalidCapabilityKind;
+    const operation = std.enums.fromInt(capability.Operation, frame.payload[1]) orelse return error.InvalidOperation;
     if (frame.payload[2] > 1) return error.InvalidAuthorizationFlag;
     const region_len: usize = frame.payload[3];
     if (region_len > max_region_bytes or command_header_size + region_len > frame.payload.len) {
@@ -78,7 +78,7 @@ pub fn decodeResponse(frame_bytes: []const u8) !WireResponse {
     if (frame.kind != .response) return error.UnexpectedFrameKind;
     if (frame.payload.len == 0) return error.TruncatedResponse;
     return .{
-        .status = std.meta.intToEnum(capability.Status, frame.payload[0]) catch return error.InvalidStatus,
+        .status = std.enums.fromInt(capability.Status, frame.payload[0]) orelse return error.InvalidStatus,
         .data = frame.payload[1..],
     };
 }

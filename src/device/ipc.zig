@@ -45,7 +45,7 @@ pub fn decode(bytes: []const u8) !Frame {
     if (bytes.len < header_size + checksum_size) return error.TruncatedFrame;
     if (!std.mem.eql(u8, bytes[0..4], magic)) return error.InvalidMagic;
     if (bytes[4] != version) return error.UnsupportedVersion;
-    const kind = std.meta.intToEnum(Kind, bytes[5]) catch return error.InvalidKind;
+    const kind = std.enums.fromInt(Kind, bytes[5]) orelse return error.InvalidKind;
     const sequence = std.mem.readInt(u32, bytes[6..10], .little);
     if (sequence == 0) return error.InvalidSequence;
     const payload_len: usize = std.mem.readInt(u32, bytes[10..14], .little);
