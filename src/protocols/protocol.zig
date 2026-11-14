@@ -181,6 +181,20 @@ pub const AnalysisResult = struct {
 };
 
 pub const AnalyzeFn = *const fn (allocator: std.mem.Allocator, data: []const u8) anyerror!AnalysisResult;
+
+/// Analysis parameters that cannot be derived from the bytes alone (firmware needs a
+/// load address and architecture; captures will need snaplen later). Descriptors that
+/// do not opt in keep using the parameter-less AnalyzeFn.
+pub const AnalyzeOptions = struct {
+    architecture: ?[]const u8 = null,
+    base_address: u32 = 0,
+};
+
+pub const AnalyzeWithFn = *const fn (
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    options: AnalyzeOptions,
+) anyerror!AnalysisResult;
 pub const SampleFn = *const fn (allocator: std.mem.Allocator) anyerror![]u8;
 
 pub const ProtocolDescriptor = struct {
@@ -192,6 +206,8 @@ pub const ProtocolDescriptor = struct {
     media_type: []const u8 = "application/octet-stream",
     auto_detect: bool = true,
     analyze: AnalyzeFn,
+    /// Optional parameterised entry point. When present, run() prefers it.
+    analyze_with: ?AnalyzeWithFn = null,
     sample: ?SampleFn = null,
 
     pub fn validatedCopy(
@@ -202,6 +218,17 @@ pub const ProtocolDescriptor = struct {
         var analysis = try self.analyze(allocator, data);
         defer analysis.deinit();
         return allocator.dupe(u8, data);
+    }
+
+    /// Single entry point for callers: uses analyze_with when the descriptor opted in.
+    pub fn run(
+        self: ProtocolDescriptor,
+        allocator: std.mem.Allocator,
+        data: []const u8,
+        options: AnalyzeOptions,
+    ) !AnalysisResult {
+        if (self.analyze_with) |analyze_with| return analyze_with(allocator, data, options);
+        return self.analyze(allocator, data);
     }
 };
 
@@ -402,4 +429,22 @@ test "analysis result owns all caller-provided text" {
     try std.testing.expectEqualStrings("v", result.observations.items[0].version);
     try std.testing.expectEqualStrings("e", result.observations.items[0].evidence);
     try std.testing.expectEqualStrings("o", result.observations.items[0].source_id);
+}
+
+test "descriptor run falls back to the parameter-less analyze" {
+    const fake = struct {
+        fn analyze(allocator: std.mem.Allocator, _: []const u8) !AnalysisResult {
+            return AnalysisResult.init(allocator, "fallback");
+        }
+    }.analyze;
+    const descriptor = ProtocolDescriptor{
+        .id = "x",
+        .name = "X",
+        .category = "Test",
+        .file_extension = "x",
+        .analyze = fake,
+    };
+    var result = try descriptor.run(std.testing.allocator, "bytes", .{});
+    defer result.deinit();
+    try std.testing.expectEqualStrings("fallback", result.summary);
 }

@@ -33,6 +33,15 @@ pub const ProtocolWorkbench = struct {
     }
 
     pub fn analyzePath(self: *ProtocolWorkbench, protocol_id: ?[]const u8, path: []const u8) !Analysis {
+        return self.analyzePathWith(protocol_id, path, .{});
+    }
+
+    pub fn analyzePathWith(
+        self: *ProtocolWorkbench,
+        protocol_id: ?[]const u8,
+        path: []const u8,
+        options: protocol.AnalyzeOptions,
+    ) !Analysis {
         const descriptor = if (protocol_id) |id|
             self.registry.find(id) orelse return error.UnknownProtocol
         else
@@ -41,7 +50,7 @@ pub const ProtocolWorkbench = struct {
         const data = try self.storage.loadBytes(self.allocator, path);
         defer self.allocator.free(data);
 
-        return self.analyzeBytes(descriptor, path, data);
+        return self.analyzeBytesWith(descriptor, path, data, options);
     }
 
     pub fn analyzeBytes(
@@ -49,6 +58,16 @@ pub const ProtocolWorkbench = struct {
         descriptor: protocol.ProtocolDescriptor,
         path: []const u8,
         data: []const u8,
+    ) !Analysis {
+        return self.analyzeBytesWith(descriptor, path, data, .{});
+    }
+
+    pub fn analyzeBytesWith(
+        self: *ProtocolWorkbench,
+        descriptor: protocol.ProtocolDescriptor,
+        path: []const u8,
+        data: []const u8,
+        options: protocol.AnalyzeOptions,
     ) !Analysis {
         var artifact = try artifact_mod.Artifact.fromBytes(
             self.allocator,
@@ -60,7 +79,7 @@ pub const ProtocolWorkbench = struct {
         );
         errdefer artifact.deinit();
 
-        var result = try descriptor.analyze(self.allocator, data);
+        var result = try descriptor.run(self.allocator, data, options);
         errdefer result.deinit();
 
         return .{

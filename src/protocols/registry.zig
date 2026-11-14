@@ -9,6 +9,7 @@ const nmap = @import("nmap.zig");
 const nuclei = @import("nuclei.zig");
 const pcap = @import("pcap.zig");
 const subghz = @import("subghz.zig");
+const firmware = @import("firmware.zig");
 
 const builtins = [_]protocol.ProtocolDescriptor{
     badusb.descriptor,
@@ -20,6 +21,7 @@ const builtins = [_]protocol.ProtocolDescriptor{
     nuclei.descriptor,
     pcap.descriptor,
     subghz.descriptor,
+    firmware.descriptor,
 };
 
 pub fn builtinProtocols() []const protocol.ProtocolDescriptor {

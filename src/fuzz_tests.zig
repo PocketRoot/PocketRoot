@@ -15,6 +15,8 @@ const nmap = @import("protocols/nmap.zig");
 const nuclei = @import("protocols/nuclei.zig");
 const pcap = @import("protocols/pcap.zig");
 const subghz = @import("protocols/subghz.zig");
+const firmware = @import("protocols/firmware.zig");
+const script = @import("services/script.zig");
 
 const empty_pcap = [_]u8{
     0xd4, 0xc3, 0xb2, 0xa1, // little-endian, microsecond timestamps
@@ -77,8 +79,26 @@ const subghz_seed = fuzzSeed(
     \\
 );
 const pcap_seed = fuzzSeed(&empty_pcap);
+const firmware_seed = fuzzSeed(&[_]u8{
+    0x00, 0x10, 0x00, 0x20, 0x01, 0x01, 0x00, 0x08,
+    'P',  'O',  'C',  'K',  'E',  'T',  'R',  'O',
+    0x00, 0x00, 0x00, 0x00,
+});
+
+const script_seed = fuzzSeed(
+    \\script "fuzz" do
+    \\    use "pack.rf"
+    \\    cap rf_capture = subghz.read
+    \\    step "s" do
+    \\        sig = rf_capture { into = "artifact" }
+    \\        stop
+    \\    end
+    \\end
+);
 
 const corpus = [_][]const u8{
+    &script_seed,
+    &firmware_seed,
     &badusb_seed,
     &ibutton_seed,
     &infrared_seed,
@@ -142,6 +162,12 @@ fn fuzzParsers(_: void, smith: *std.testing.Smith) !void {
     fuzzAnalysis(nuclei.analyzeText, data);
     fuzzAnalysis(pcap.analyzeCapture, data);
     fuzzAnalysis(subghz.analyzeText, data);
+    fuzzAnalysis(firmware.analyzeDefault, data);
+
+    if (script.parse(std.testing.allocator, data)) |parsed| {
+        var value = parsed;
+        value.deinit();
+    } else |_| {}
 }
 
 fn fuzzAnalysis(comptime analyze: anytype, data: []const u8) void {

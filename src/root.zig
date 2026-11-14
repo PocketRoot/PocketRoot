@@ -43,6 +43,8 @@ pub const services = struct {
     pub const tls_inspect = @import("services/tls_inspect.zig");
     pub const tcp_scan = @import("services/tcp_scan.zig");
     pub const workflow = @import("services/workflow.zig");
+    pub const script = @import("services/script.zig");
+    pub const script_builder = @import("services/script_builder.zig");
 };
 
 pub const protocols = struct {
@@ -57,6 +59,7 @@ pub const protocols = struct {
     pub const nuclei = @import("protocols/nuclei.zig");
     pub const pcap = @import("protocols/pcap.zig");
     pub const subghz = @import("protocols/subghz.zig");
+    pub const firmware = @import("protocols/firmware.zig");
 };
 
 pub const apps = struct {
@@ -117,8 +120,68 @@ pub const inspectTls = services.tls_inspect.inspect;
 pub const scanTcp = services.tcp_scan.scan;
 pub const WorkflowRunner = services.workflow.Runner;
 pub const WorkflowDefinition = services.workflow.Definition;
+pub const Script = services.script.Script;
+pub const ScriptExecutor = services.script_builder.Executor;
+pub const ScriptError = services.script.Error;
 
 test {
+    // Group structs (core/device/formats/...) do not force analysis of their nested
+    // file containers, so their test blocks were silently skipped. Reference every
+    // module container explicitly: this is also the canonical module list.
     std.testing.refAllDecls(@This());
+    inline for (.{
+        core.event_bus,
+        core.artifact,
+        core.capability,
+        core.network_observation,
+        device.command,
+        device.ipc,
+        formats.dhcp,
+        formats.dhcpv6,
+        formats.dns,
+        formats.flipper_format,
+        formats.nbns,
+        formats.ssdp,
+        formats.tls_certificate,
+        protocols.protocol,
+        protocols.registry,
+        protocols.badusb,
+        protocols.infrared,
+        protocols.lfrfid,
+        protocols.nfc,
+        protocols.ibutton,
+        protocols.nmap,
+        protocols.nuclei,
+        protocols.pcap,
+        protocols.subghz,
+        protocols.firmware,
+        services.storage,
+        services.notification,
+        services.archive,
+        services.automation,
+        services.workbench,
+        services.asset_graph,
+        services.vulnerability_matcher,
+        services.vulnerability_catalog,
+        services.project,
+        services.network_environment,
+        services.network_discovery,
+        services.network_scan,
+        services.neighbor_probe,
+        services.live_capture,
+        services.library,
+        services.http_inspect,
+        services.tls_inspect,
+        services.tcp_scan,
+        services.workflow,
+        services.script,
+        services.script_builder,
+        apps.app,
+        apps.infrared,
+        simulator.device,
+        simulator.loopback,
+    }) |module| {
+        std.testing.refAllDecls(module);
+    }
     _ = @import("fuzz_tests.zig");
 }

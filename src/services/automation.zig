@@ -4,6 +4,20 @@ const workflow = @import("workflow.zig");
 
 pub const max_actions = 256;
 
+/// Script "emit" directives are carried as actions so they keep their position in
+/// the workflow order, but they never reach the capability service.
+pub const Emit = struct {
+    severity: []const u8 = "info",
+    message: []const u8 = "",
+    payload: []const u8 = "",
+};
+
+pub const Emitted = struct {
+    severity: []const u8,
+    message: []const u8,
+    payload: []const u8,
+};
+
 pub const ActionSpec = struct {
     id: []const u8,
     subject: []const u8,
@@ -12,6 +26,7 @@ pub const ActionSpec = struct {
     region: []const u8 = "",
     payload: []const u8 = "",
     active_authorized: bool = false,
+    emit: ?Emit = null,
 };
 
 /// Two-phase initialization keeps workflow callbacks bound to this engine.
@@ -21,6 +36,7 @@ pub const Engine = struct {
     runner: workflow.Runner,
     next_request_id: u64 = 1,
     last_status: ?capability.Status = null,
+    emitted: std.ArrayList(Emitted) = .empty,
 
     pub fn init(
         self: *Engine,
@@ -36,6 +52,12 @@ pub const Engine = struct {
         self.runner = workflow.Runner.init(self, executeAction, evaluateCondition);
         self.next_request_id = 1;
         self.last_status = null;
+        self.emitted = .empty;
+    }
+
+    pub fn deinit(self: *Engine) void {
+        self.emitted.deinit(self.capabilities.allocator);
+        self.* = undefined;
     }
 
     pub fn tick(self: *Engine, definition: workflow.Definition, now_ms: u64) !workflow.Status {
@@ -54,6 +76,15 @@ pub const Engine = struct {
     fn executeAction(context: *anyopaque, action_id: []const u8, _: u16) !workflow.ActionState {
         const self: *Engine = @ptrCast(@alignCast(context));
         const spec = self.findAction(action_id) orelse return error.UnknownAction;
+        if (spec.emit) |emit| {
+            try self.emitted.append(self.capabilities.allocator, .{
+                .severity = emit.severity,
+                .message = emit.message,
+                .payload = emit.payload,
+            });
+            self.last_status = .succeeded;
+            return .succeeded;
+        }
         if (self.next_request_id == 0) return error.RequestIdExhausted;
         const request_id = self.next_request_id;
         self.next_request_id +%= 1;
