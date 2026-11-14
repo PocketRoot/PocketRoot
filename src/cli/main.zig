@@ -315,6 +315,83 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "vulns")) {
+        if (args.len < 4) {
+            try stdout.print("usage: vulns <catalog.jsonl> <path>... [--protocol <id> <path>]...\n", .{});
+            return error.InvalidArguments;
+        }
+        const inputs = parseProjectInputs(arena, args[3..]) catch {
+            try stdout.print("usage: vulns <catalog.jsonl> <path>... [--protocol <id> <path>]...\n", .{});
+            return error.InvalidArguments;
+        };
+        defer arena.free(inputs);
+
+        const catalog_data = runtime.storage.loadBytes(arena, args[2]) catch |err| {
+            try stdout.print("cannot load vulnerability catalog: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer arena.free(catalog_data);
+        var catalog = PocketRoot.services.vulnerability_catalog.Catalog.load(arena, catalog_data) catch |err| {
+            try stdout.print("invalid vulnerability catalog: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer catalog.deinit();
+
+        var project = PocketRoot.Project.init(arena);
+        defer project.deinit();
+        for (inputs) |input| try importProjectInput(&runtime, &project, inputs, input);
+        var graph = try PocketRoot.AssetGraph.build(arena, project.analyses.items);
+        defer graph.deinit();
+        var report = try PocketRoot.services.vulnerability_matcher.match(
+            arena,
+            &graph,
+            catalog.vulnerabilities,
+            .{},
+        );
+        defer report.deinit();
+        try printVulnerabilityReport(stdout, &graph, &catalog, &report);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[1], "migrate")) {
+        const explicit = args.len == 6 and std.mem.eql(u8, args[2], "--protocol");
+        if ((!explicit and args.len != 4) or (explicit and args.len != 6)) {
+            try stdout.print("usage: migrate [--protocol <id>] <input> <output>\n", .{});
+            return error.InvalidArguments;
+        }
+        const protocol_id: ?[]const u8 = if (explicit) args[3] else null;
+        const input_path = if (explicit) args[4] else args[2];
+        const output_path = if (explicit) args[5] else args[3];
+        if (std.mem.eql(u8, input_path, output_path)) {
+            try stdout.print("input and output paths must differ\n", .{});
+            return error.InvalidArguments;
+        }
+        const registered = if (protocol_id) |id|
+            runtime.protocols.find(id)
+        else
+            runtime.protocols.inferFromPath(input_path);
+        const descriptor = registered orelse {
+            try stdout.print("unknown protocol for: {s}\n", .{input_path});
+            return error.InvalidArguments;
+        };
+        const data = runtime.storage.loadBytes(arena, input_path) catch |err| {
+            try stdout.print("cannot load migration input: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer arena.free(data);
+        const preserved = descriptor.validatedCopy(arena, data) catch |err| {
+            try stdout.print("invalid {s} input: {s}\n", .{ descriptor.id, @errorName(err) });
+            return error.CommandFailed;
+        };
+        defer arena.free(preserved);
+        runtime.storage.saveBytes(output_path, preserved) catch |err| {
+            try stdout.print("cannot save migration output: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        try stdout.print("migrated {s} byte-exact: {s} -> {s}\n", .{ descriptor.id, input_path, output_path });
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "run")) {
         if (args.len < 3) {
             try stdout.print("missing app id\n\n", .{});
@@ -475,6 +552,10 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  tls-inspect <target> [port]  Inspect one TLS endpoint
         \\  archive [root]       List protocol files under a directory
         \\  project [--json] <path>... [--protocol <id> <path>]...
+        \\  vulns <catalog.jsonl> <path>... [--protocol <id> <path>]...
+        \\                       Match offline observations to the local catalogue
+        \\  migrate [--protocol <id>] <input> <output>
+        \\                       Validate and preserve a Flipper file byte-exact
         \\  analyze [--json] <path>  Analyze a protocol file by extension
         \\  analyze [--json] --protocol <id> <path>
         \\  report [--protocol <id>] <path>
@@ -493,6 +574,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot tls-inspect example.com 443
         \\  PocketRoot archive
         \\  PocketRoot project samples --protocol nmap samples/network/nmap-demo.xml --protocol nuclei samples/network/nuclei-demo.jsonl
+        \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
+        \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
         \\  PocketRoot analyze --json samples/infrared/demo-power.ir
         \\  PocketRoot analyze samples/subghz/demo-princeton.sub
@@ -541,6 +624,40 @@ fn printProtocols(writer: *Io.Writer, protocols: []const PocketRoot.ProtocolDesc
             if (descriptor.auto_detect) "auto" else "manual",
             descriptor.name,
         });
+    }
+}
+
+fn printVulnerabilityReport(
+    writer: *Io.Writer,
+    graph: *const PocketRoot.AssetGraph,
+    catalog: *const PocketRoot.services.vulnerability_catalog.Catalog,
+    report: *const PocketRoot.services.vulnerability_matcher.Report,
+) !void {
+    try writer.print(
+        "vulnerabilities: {d} match(es), {d} endpoint(s) examined\n",
+        .{ report.matches.items.len, report.endpoints_examined },
+    );
+    for (report.matches.items) |match| {
+        const vulnerability = catalog.vulnerabilities[match.vulnerability_index];
+        const asset = &graph.assets.items[match.asset_index];
+        const endpoint = asset.endpoints.items[match.endpoint_index];
+        try writer.print("  {s} [{s}] ", .{ vulnerability.id, @tagName(vulnerability.severity) });
+        try printTerminalText(writer, asset.preferredName());
+        try writer.print(" ", .{});
+        try printTerminalText(writer, endpoint.transport);
+        if (endpoint.port) |port| try writer.print("/{d}", .{port});
+        try writer.print(" ", .{});
+        try printTerminalText(writer, endpoint.product);
+        try writer.print(" ", .{});
+        try printTerminalText(writer, endpoint.version);
+        try writer.print(" - ", .{});
+        try printTerminalText(writer, vulnerability.title);
+        try writer.writeByte('\n');
+        if (vulnerability.reference.len > 0) {
+            try writer.print("    reference: ", .{});
+            try printTerminalText(writer, vulnerability.reference);
+            try writer.writeByte('\n');
+        }
     }
 }
 

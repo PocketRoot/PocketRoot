@@ -58,6 +58,13 @@ pub fn build(b: *std.Build) void {
         "nuclei",
         "samples/network/nuclei-demo.jsonl",
     });
+    addSmoke(smoke_step, exe, &.{
+        "vulns",
+        "../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl",
+        "--protocol",
+        "nmap",
+        "samples/network/nmap-demo.xml",
+    });
 
     const check_step = b.step("check", "Run formatting, tests, and offline smoke checks");
     check_step.dependOn(&fmt_check.step);
