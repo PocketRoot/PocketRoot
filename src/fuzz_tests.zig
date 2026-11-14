@@ -10,6 +10,7 @@ const badusb = @import("protocols/badusb.zig");
 const ibutton = @import("protocols/ibutton.zig");
 const infrared = @import("protocols/infrared.zig");
 const lfrfid = @import("protocols/lfrfid.zig");
+const nfc = @import("protocols/nfc.zig");
 const nmap = @import("protocols/nmap.zig");
 const nuclei = @import("protocols/nuclei.zig");
 const pcap = @import("protocols/pcap.zig");
@@ -53,6 +54,15 @@ const lfrfid_seed = fuzzSeed(
     \\Data: 01 23 45 67 89
     \\
 );
+const nfc_seed = fuzzSeed(
+    \\Filetype: Flipper NFC device
+    \\Version: 4
+    \\Device type: ISO14443-3A
+    \\UID: 04 48 6A 32 33 58 80
+    \\ATQA: 00 44
+    \\SAK: 00
+    \\
+);
 const nmap_seed = fuzzSeed("<nmaprun scanner=\"nmap\"><host><status state=\"up\"/></host></nmaprun>");
 const nuclei_seed = fuzzSeed("{\"template-id\":\"seed\",\"info\":{\"name\":\"seed\",\"severity\":\"info\"},\"host\":\"https://example.test\"}\n");
 const subghz_seed = fuzzSeed(
@@ -73,6 +83,7 @@ const corpus = [_][]const u8{
     &ibutton_seed,
     &infrared_seed,
     &lfrfid_seed,
+    &nfc_seed,
     &nmap_seed,
     &nuclei_seed,
     &subghz_seed,
@@ -126,6 +137,7 @@ fn fuzzParsers(_: void, smith: *std.testing.Smith) !void {
     fuzzAnalysis(ibutton.analyzeText, data);
     fuzzAnalysis(infrared.analyzeText, data);
     fuzzAnalysis(lfrfid.analyzeText, data);
+    fuzzAnalysis(nfc.analyzeText, data);
     fuzzAnalysis(nmap.analyzeText, data);
     fuzzAnalysis(nuclei.analyzeText, data);
     fuzzAnalysis(pcap.analyzeCapture, data);

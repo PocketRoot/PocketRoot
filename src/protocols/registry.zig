@@ -3,6 +3,7 @@ const protocol = @import("protocol.zig");
 const badusb = @import("badusb.zig");
 const infrared = @import("infrared.zig");
 const lfrfid = @import("lfrfid.zig");
+const nfc = @import("nfc.zig");
 const ibutton = @import("ibutton.zig");
 const nmap = @import("nmap.zig");
 const nuclei = @import("nuclei.zig");
@@ -13,6 +14,7 @@ const builtins = [_]protocol.ProtocolDescriptor{
     badusb.descriptor,
     infrared.descriptor,
     lfrfid.descriptor,
+    nfc.descriptor,
     ibutton.descriptor,
     nmap.descriptor,
     nuclei.descriptor,
@@ -61,7 +63,8 @@ test "protocol registry finds infrared" {
     const registry = ProtocolRegistry.init(builtinProtocols());
 
     try std.testing.expect(registry.find("infrared") != null);
-    try std.testing.expect(registry.find("nfc") == null);
+    try std.testing.expect(registry.find("nfc") != null);
+    try std.testing.expect(registry.findByExtension(".nfc") != null);
     try std.testing.expect(registry.findByExtension(".ir") != null);
     try std.testing.expect(registry.inferFromPath("samples/infrared/demo-power.ir") != null);
     try std.testing.expect(registry.find("subghz") != null);
@@ -109,4 +112,15 @@ test "protocol registry supports additional extensions and manual protocols" {
 
     try std.testing.expectEqualStrings("capture", registry.findByExtension(".PCAPNG").?.id);
     try std.testing.expect(registry.findByExtension("jsonl") == null);
+}
+
+test "registered samples support byte-exact validated migration" {
+    for (builtinProtocols()) |registered| {
+        const sample_fn = registered.sample orelse continue;
+        const sample = try sample_fn(std.testing.allocator);
+        defer std.testing.allocator.free(sample);
+        const migrated = try registered.validatedCopy(std.testing.allocator, sample);
+        defer std.testing.allocator.free(migrated);
+        try std.testing.expectEqualSlices(u8, sample, migrated);
+    }
 }

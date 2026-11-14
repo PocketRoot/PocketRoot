@@ -4,7 +4,13 @@ const std = @import("std");
 pub const core = struct {
     pub const event_bus = @import("core/event_bus.zig");
     pub const artifact = @import("core/artifact.zig");
+    pub const capability = @import("core/capability.zig");
     pub const network_observation = @import("core/network_observation.zig");
+};
+
+pub const device = struct {
+    pub const command = @import("device/command.zig");
+    pub const ipc = @import("device/ipc.zig");
 };
 
 pub const formats = struct {
@@ -21,6 +27,7 @@ pub const services = struct {
     pub const storage = @import("services/storage.zig");
     pub const notification = @import("services/notification.zig");
     pub const archive = @import("services/archive.zig");
+    pub const automation = @import("services/automation.zig");
     pub const workbench = @import("services/workbench.zig");
     pub const asset_graph = @import("services/asset_graph.zig");
     pub const vulnerability_matcher = @import("services/vulnerability_matcher.zig");
@@ -31,9 +38,11 @@ pub const services = struct {
     pub const network_scan = @import("services/network_scan.zig");
     pub const neighbor_probe = @import("services/neighbor_probe.zig");
     pub const live_capture = @import("services/live_capture.zig");
+    pub const library = @import("services/library.zig");
     pub const http_inspect = @import("services/http_inspect.zig");
     pub const tls_inspect = @import("services/tls_inspect.zig");
     pub const tcp_scan = @import("services/tcp_scan.zig");
+    pub const workflow = @import("services/workflow.zig");
 };
 
 pub const protocols = struct {
@@ -42,6 +51,7 @@ pub const protocols = struct {
     pub const badusb = @import("protocols/badusb.zig");
     pub const infrared = @import("protocols/infrared.zig");
     pub const lfrfid = @import("protocols/lfrfid.zig");
+    pub const nfc = @import("protocols/nfc.zig");
     pub const ibutton = @import("protocols/ibutton.zig");
     pub const nmap = @import("protocols/nmap.zig");
     pub const nuclei = @import("protocols/nuclei.zig");
@@ -66,6 +76,8 @@ pub const apps = struct {
 };
 
 pub const simulator = struct {
+    pub const device = @import("simulator/device.zig");
+    pub const loopback = @import("simulator/loopback.zig");
     pub const Runtime = @import("simulator/runtime.zig").Runtime;
 };
 
@@ -73,6 +85,9 @@ pub const EventBus = core.event_bus.EventBus;
 pub const Event = core.event_bus.Event;
 pub const Artifact = core.artifact.Artifact;
 pub const ArtifactSource = core.artifact.ArtifactSource;
+pub const CapabilityService = core.capability.Service;
+pub const CapabilityRequest = core.capability.Request;
+pub const CapabilityResult = core.capability.Result;
 pub const AppContext = apps.app.AppContext;
 pub const AppDescriptor = apps.app.AppDescriptor;
 pub const AppManager = apps.app.AppManager;
@@ -100,6 +115,8 @@ pub const captureNetwork = services.live_capture.capture;
 pub const inspectHttp = services.http_inspect.inspect;
 pub const inspectTls = services.tls_inspect.inspect;
 pub const scanTcp = services.tcp_scan.scan;
+pub const WorkflowRunner = services.workflow.Runner;
+pub const WorkflowDefinition = services.workflow.Definition;
 
 test {
     std.testing.refAllDecls(@This());

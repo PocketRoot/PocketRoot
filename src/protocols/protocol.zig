@@ -193,6 +193,16 @@ pub const ProtocolDescriptor = struct {
     auto_detect: bool = true,
     analyze: AnalyzeFn,
     sample: ?SampleFn = null,
+
+    pub fn validatedCopy(
+        self: ProtocolDescriptor,
+        allocator: std.mem.Allocator,
+        data: []const u8,
+    ) ![]u8 {
+        var analysis = try self.analyze(allocator, data);
+        defer analysis.deinit();
+        return allocator.dupe(u8, data);
+    }
 };
 
 test "analysis result owns fields and findings" {
