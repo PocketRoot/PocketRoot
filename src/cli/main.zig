@@ -949,6 +949,14 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                       Validate and preserve a Flipper file byte-exact
         \\  script run [--lib a.pk,b.pk] [--authorize-active] [--region <id>] <file.pk>
         \\                       Compile and run a DSL script on the simulated backend
+        \\  device info          Show the capability host, protocol and audit limits
+        \\  device request <kind> <operation> [--subject s] [--payload p] [--region r]
+        \\                 [--authorize-active] [--allow-active] [--audit path]
+        \\                       Execute one request through the capability kernel
+        \\  device serve [--transport stdio|loopback] [--frames path] [--output path]
+        \\                 [--subject s] [--region r] [--allow-active] [--audit path]
+        \\                       Serve PKRT frames from stdin or a recorded stream
+        \\  audit [--json] <path>  Summarize an exported audit log
         \\  analyze [--json] <path>  Analyze a protocol file by extension
         \\  analyze [--json] [--base <hex>] [--arch <thumb|arm>] --protocol firmware <path>
         \\                       Firmware triage with Thumb disassembly
@@ -969,6 +977,10 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot tls-inspect example.com 443
         \\  PocketRoot archive
         \\  PocketRoot project samples --protocol nmap samples/network/nmap-demo.xml --protocol nuclei samples/network/nuclei-demo.jsonl
+        \\  PocketRoot device request infrared read --payload capture
+        \\  PocketRoot device request subghz transmit --authorize-active
+        \\  PocketRoot device serve --transport stdio
+        \\  PocketRoot audit audit.jsonl
         \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
         \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
@@ -2418,4 +2430,15 @@ test "device serve executes a recorded loopback frame stream" {
     const response = try PocketRoot.device.command.decodeResponse(writer.buffered());
     try std.testing.expectEqual(PocketRoot.core.capability.Status.succeeded, response.status);
     try std.testing.expectEqualStrings("capture", response.data);
+}
+
+test "usage lists the device host and audit commands" {
+    var buffer: [16 * 1024]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    try printUsage(&writer);
+    const usage = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, usage, "device info") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "device request") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "device serve") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "audit [--json]") != null);
 }
