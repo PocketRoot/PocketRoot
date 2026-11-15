@@ -1,5 +1,6 @@
 const std = @import("std");
 const capability = @import("../core/capability.zig");
+const fixtures = @import("fixtures.zig");
 
 pub const Backend = struct {
     supported: [std.meta.fields(capability.Kind).len]bool = @splat(false),
@@ -20,6 +21,11 @@ pub const Backend = struct {
         const self: *Backend = @ptrCast(@alignCast(context));
         if (!self.supported[@intFromEnum(request.kind)]) {
             return capability.Result.init(allocator, .unsupported, "simulator capability unavailable");
+        }
+        if (request.kind == .network) {
+            if (fixtures.lookup(request.payload)) |fixture| {
+                return capability.Result.init(allocator, .succeeded, fixture.response);
+            }
         }
         return capability.Result.init(
             allocator,

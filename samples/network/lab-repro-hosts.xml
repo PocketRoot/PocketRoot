@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<nmaprun scanner="nmap">
+  <host>
+    <status state="up"/>
+    <address addr="192.0.2.80" addrtype="ipv4"/>
+    <hostnames><hostname name="lab-apache-249.lan"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="18080">
+        <state state="open"/>
+        <service name="http" product="Apache httpd" version="2.4.49"/>
+      </port>
+    </ports>
+  </host>
+  <host>
+    <status state="up"/>
+    <address addr="192.0.2.82" addrtype="ipv4"/>
+    <hostnames><hostname name="lab-apache-250.lan"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="18082">
+        <state state="open"/>
+        <service name="http" product="Apache httpd" version="2.4.50"/>
+      </port>
+    </ports>
+  </host>
+  <host>
+    <status state="up"/>
+    <address addr="192.0.2.84" addrtype="ipv4"/>
+    <hostnames><hostname name="lab-apache-251.lan"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="18084">
+        <state state="open"/>
+        <service name="http" product="Apache httpd" version="2.4.51"/>
+      </port>
+    </ports>
+  </host>
+  <host>
+    <status state="up"/>
+    <address addr="192.0.2.86" addrtype="ipv4"/>
+    <hostnames><hostname name="lab-apache-267.lan"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="18086">
+        <state state="open"/>
+        <service name="http" product="Apache httpd" version="2.4.67"/>
+      </port>
+    </ports>
+  </host>
+  <host>
+    <status state="up"/>
+    <address addr="192.0.2.25" addrtype="ipv4"/>
+    <hostnames><hostname name="lab-redis-725.lan"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open"/>
+        <service name="redis" product="Redis" version="7.2.5"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>

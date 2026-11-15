@@ -184,3 +184,42 @@ demonstrates compilation, execution, audit and gating; it does not drive hardwar
 | Loop bound | 64 |
 | `budget.time` | 10 minutes |
 | Sub-script nesting | 8 |
+
+## 9. Verifying a catalogue entry
+
+`net.scan` returns the recorded observation for a lab target when the payload names it,
+so a script can decide from data instead of from constants:
+
+```lua
+script "verify-cve-2021-41773" do
+    use "pack.net"
+    cap scan = net.scan
+    step "lookup" do
+        observation = scan { payload = "target=lab-apache-249.lan:18080" }
+        out observation
+        if observation.version == "2.4.49" then
+            emit finding {
+                severity = "critical",
+                message = "CVE-2021-41773 applies: Apache 2.4.49 path traversal"
+            }
+        else
+            emit info "version does not match the reproduced build"
+        end
+    end
+end
+```
+
+The four scripts in `samples/scripts/` cover the entries that the catalogue repository
+reproduced in Docker (CVE-2021-41773, CVE-2021-42013, CVE-2024-31449 and the inconclusive
+CVE-2026-44631). Observations come from `src/simulator/fixtures.zig`; they are recorded
+values, not live traffic, and the targets are synthetic names.
+
+`emit` fields take literals only, so a variable cannot be embedded in a finding message.
+
+The catalogue repository runs these scripts, then the matcher, and compares both results
+with the reproduction evidence:
+
+```powershell
+PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1        # 14 checks
+PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1 -WithDocker
+```
