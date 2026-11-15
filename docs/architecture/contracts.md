@@ -44,7 +44,8 @@ byte-exact behaviour, and `registry.zig` asserts a sample round-trip.
 ### 1.3 `auto_detect = false`
 
 `archive` reports such files as unknown and `project` skips them. Current manual
-protocols: `badusb` (.txt), `nmap` (.xml), `nuclei` (.jsonl).
+protocols: `badusb` (.txt), `nmap` (.xml), `nuclei` (.jsonl), `firmware` (.bin/.elf/.hex/.img),
+`cyclonedx` (.cdx.json), `spdx` (.spdx.json) and `npm-lock` (.package-lock.json).
 
 ## 2. Result model
 
@@ -118,6 +119,16 @@ backend's own status). Resource locks are exclusive per `Kind` and released on e
 `emergencyStop()` sets `stopped` and releases all locks. The audit log holds 4096
 entries and returns `AuditLogFull` beyond that.
 
+### 3.1 Host entry point
+
+`services/device_host.zig` wires the kernel to a runnable service: policy, simulated
+backend, subject, an optional JSONL sink (`pocketroot.audit.v1`) and the PKRT frame loop.
+The CLI exposes it as `device info`, `device request` and `device serve`; `audit` reads the
+JSONL sink back. `device serve` accepts request frames on stdin (`--transport stdio`) or
+from a recorded stream (`--transport loopback --frames <path>`) and writes response frames
+to stdout or `--output <path>`. Responses are byte-identical to a device's, so external
+tooling can replay a session without the engine.
+
 ## 4. IPC wire format (`src/device/ipc.zig`)
 
 Little-endian frame layout:
@@ -134,7 +145,8 @@ Little-endian frame layout:
 
 `header_size = 14`, `checksum_size = 4`. `decode` requires an exact length match; one
 extra byte yields `InvalidFrameLength`. `Session` increments the send sequence and
-rejects replayed frames.
+rejects replayed frames. `device serve` applies the same replay rule to every incoming
+request frame.
 
 Capability command payload (`src/device/command.zig`):
 
@@ -156,6 +168,9 @@ A response payload starts with the `capability.Status` byte followed by the data
 | `pocketroot.vulnerability.v2` | `services/vulnerability_catalog.zig` | One catalogue line (vendors, aliases, CVSS, references, inclusive ranges) |
 | `pocketroot.vulnerability.v1` | `services/vulnerability_catalog.zig` | Legacy catalogue line, still accepted |
 | `pocketroot.vulnerability.provenance.v1` | validated by the catalogue repository script | Provenance pointer |
+| `pocketroot.audit.v1` | `services/audit_log.zig` | One exported audit line (host entry) |
+| `pocketroot.analysis.v1` | CLI JSON output | One analysis |
+| `pocketroot.script.v1` | `services/script.zig` | DSL source and limits |
 | `pocketroot.project.v1` | CLI JSON output | Project report |
 | `pocketroot.library.v1` | `services/library.zig` | Saved library entries |
 

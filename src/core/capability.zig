@@ -112,15 +112,24 @@ pub const AuditEntry = struct {
     allocator: std.mem.Allocator,
     request_id: u64,
     subject: []u8,
+    /// Recorded so an export can show why an active request was allowed or refused.
+    region: []u8,
+    active_authorized: bool,
     kind: Kind,
     operation: Operation,
     status: Status,
 
     fn init(allocator: std.mem.Allocator, request: Request, status: Status) !AuditEntry {
+        const subject = try allocator.dupe(u8, request.subject);
+        errdefer allocator.free(subject);
+        const region = try allocator.dupe(u8, request.region);
+        errdefer allocator.free(region);
         return .{
             .allocator = allocator,
             .request_id = request.id,
-            .subject = try allocator.dupe(u8, request.subject),
+            .subject = subject,
+            .region = region,
+            .active_authorized = request.active_authorized,
             .kind = request.kind,
             .operation = request.operation,
             .status = status,
@@ -129,6 +138,7 @@ pub const AuditEntry = struct {
 
     fn deinit(self: *AuditEntry) void {
         self.allocator.free(self.subject);
+        self.allocator.free(self.region);
         self.* = undefined;
     }
 };

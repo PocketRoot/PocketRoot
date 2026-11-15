@@ -26,6 +26,8 @@ pub const formats = struct {
 
 pub const services = struct {
     pub const storage = @import("services/storage.zig");
+    pub const audit_log = @import("services/audit_log.zig");
+    pub const device_host = @import("services/device_host.zig");
     pub const notification = @import("services/notification.zig");
     pub const archive = @import("services/archive.zig");
     pub const automation = @import("services/automation.zig");
@@ -124,6 +126,8 @@ pub const WorkflowDefinition = services.workflow.Definition;
 pub const Script = services.script.Script;
 pub const ScriptExecutor = services.script_builder.Executor;
 pub const ScriptError = services.script.Error;
+pub const DeviceHost = services.device_host.Host;
+pub const DeviceHostOptions = services.device_host.Options;
 
 test {
     // Group structs (core/device/formats/...) do not force analysis of their nested
@@ -158,6 +162,8 @@ test {
         protocols.subghz,
         protocols.firmware,
         services.storage,
+        services.audit_log,
+        services.device_host,
         services.notification,
         services.archive,
         services.automation,

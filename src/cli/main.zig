@@ -47,6 +47,16 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "device")) {
+        try runDeviceCommand(arena, init.io, stdout, args[2..]);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[1], "audit")) {
+        try runAuditCommand(arena, init.io, stdout, args[2..]);
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "network")) {
         if (args.len != 2) {
             try stdout.print("usage: network\n", .{});
@@ -552,6 +562,368 @@ fn loadAnalysis(
     };
 }
 
+const DeviceTransport = enum { stdio, loopback };
+
+const DeviceRequestArgs = struct {
+    kind: PocketRoot.core.capability.Kind,
+    operation: PocketRoot.core.capability.Operation,
+    subject: []const u8 = "host:cli",
+    payload: []const u8 = "",
+    region: []const u8 = "",
+    authorize_active: bool = false,
+    allow_active: bool = false,
+    audit_path: ?[]const u8 = null,
+};
+
+const DeviceServeArgs = struct {
+    transport: DeviceTransport = .stdio,
+    frames_path: ?[]const u8 = null,
+    output_path: ?[]const u8 = null,
+    subject: []const u8 = "host:stdio",
+    region: []const u8 = "",
+    allow_active: bool = false,
+    audit_path: ?[]const u8 = null,
+};
+
+fn parseDeviceRequest(raw: []const [:0]const u8) !DeviceRequestArgs {
+    var parsed = DeviceRequestArgs{ .kind = .infrared, .operation = .read };
+    var positionals: [2][]const u8 = undefined;
+    var positional_count: usize = 0;
+    var index: usize = 0;
+    while (index < raw.len) : (index += 1) {
+        const argument = raw[index];
+        if (std.mem.eql(u8, argument, "--subject")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.subject = raw[index];
+        } else if (std.mem.eql(u8, argument, "--payload")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.payload = raw[index];
+        } else if (std.mem.eql(u8, argument, "--region")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.region = raw[index];
+        } else if (std.mem.eql(u8, argument, "--audit")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.audit_path = raw[index];
+        } else if (std.mem.eql(u8, argument, "--authorize-active")) {
+            parsed.authorize_active = true;
+        } else if (std.mem.eql(u8, argument, "--allow-active")) {
+            parsed.allow_active = true;
+        } else if (std.mem.startsWith(u8, argument, "--")) {
+            return error.InvalidDeviceArgs;
+        } else {
+            if (positional_count >= 2) return error.InvalidDeviceArgs;
+            positionals[positional_count] = argument;
+            positional_count += 1;
+        }
+    }
+    if (positional_count != 2) return error.InvalidDeviceArgs;
+    parsed.kind = std.meta.stringToEnum(PocketRoot.core.capability.Kind, positionals[0]) orelse {
+        return error.InvalidDeviceArgs;
+    };
+    parsed.operation = std.meta.stringToEnum(PocketRoot.core.capability.Operation, positionals[1]) orelse {
+        return error.InvalidDeviceArgs;
+    };
+    return parsed;
+}
+
+fn parseDeviceServe(raw: []const [:0]const u8) !DeviceServeArgs {
+    var parsed = DeviceServeArgs{};
+    var index: usize = 0;
+    while (index < raw.len) : (index += 1) {
+        const argument = raw[index];
+        if (std.mem.eql(u8, argument, "--transport")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.transport = std.meta.stringToEnum(DeviceTransport, raw[index]) orelse {
+                return error.InvalidDeviceArgs;
+            };
+        } else if (std.mem.eql(u8, argument, "--frames")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.frames_path = raw[index];
+        } else if (std.mem.eql(u8, argument, "--output")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.output_path = raw[index];
+        } else if (std.mem.eql(u8, argument, "--subject")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.subject = raw[index];
+        } else if (std.mem.eql(u8, argument, "--region")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.region = raw[index];
+        } else if (std.mem.eql(u8, argument, "--audit")) {
+            index += 1;
+            if (index >= raw.len) return error.InvalidDeviceArgs;
+            parsed.audit_path = raw[index];
+        } else if (std.mem.eql(u8, argument, "--allow-active")) {
+            parsed.allow_active = true;
+        } else {
+            return error.InvalidDeviceArgs;
+        }
+    }
+    if (parsed.transport == .loopback and parsed.frames_path == null) return error.InvalidDeviceArgs;
+    if (parsed.transport == .stdio and parsed.frames_path != null) return error.InvalidDeviceArgs;
+    return parsed;
+}
+
+fn runDeviceCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    if (raw.len == 0) {
+        try writer.print("usage: device <info|request|serve> ...\n", .{});
+        return error.InvalidArguments;
+    }
+    if (std.mem.eql(u8, raw[0], "info")) {
+        if (raw.len != 1) {
+            try writer.print("usage: device info\n", .{});
+            return error.InvalidArguments;
+        }
+        const capability = PocketRoot.core.capability;
+        const ipc = PocketRoot.device.ipc;
+        try writer.print("device: capability host (PKRT v1 over a caller-supplied transport)\n", .{});
+        try writer.print("protocol: {s} v{d} header={d} crc={d} max_payload={d}\n", .{
+            ipc.magic,
+            ipc.version,
+            ipc.header_size,
+            ipc.checksum_size,
+            ipc.max_payload_bytes,
+        });
+        try writer.print("kinds: {d}:", .{std.meta.fields(capability.Kind).len});
+        inline for (std.meta.fields(capability.Kind)) |field| {
+            try writer.print(" {s}", .{field.name});
+        }
+        try writer.writeByte('\n');
+        try writer.print("operations: {d}:", .{std.meta.fields(capability.Operation).len});
+        inline for (std.meta.fields(capability.Operation)) |field| {
+            try writer.print(" {s}", .{field.name});
+        }
+        try writer.writeByte('\n');
+        try writer.print("default policy: region=\"\" allow_active=no stopped=no\n", .{});
+        try writer.print("audit: in-memory {d} entries; export with --audit <path>\n", .{capability.max_audit_entries});
+        try writer.print("transports: stdio, loopback (--frames <path>)\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, raw[0], "request")) {
+        const parsed = parseDeviceRequest(raw[1..]) catch {
+            try writer.print(
+                "usage: device request <kind> <operation> [--subject s] [--payload p] [--region r] [--authorize-active] [--allow-active] [--audit path]\n",
+                .{},
+            );
+            return error.InvalidArguments;
+        };
+        var host: PocketRoot.DeviceHost = undefined;
+        host.init(allocator, io, .{
+            .region = parsed.region,
+            .allow_active = parsed.allow_active,
+            .subject = parsed.subject,
+            .audit_path = parsed.audit_path,
+        }) catch |err| {
+            try writer.print("device host rejected the options: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer host.deinit();
+
+        var result = host.execute(.{
+            .id = 1,
+            .subject = parsed.subject,
+            .kind = parsed.kind,
+            .operation = parsed.operation,
+            .region = parsed.region,
+            .payload = parsed.payload,
+            .active_authorized = parsed.authorize_active,
+        }) catch |err| {
+            try writer.print("status: {s}\n", .{@tagName(host.lastStatus())});
+            try writer.print("error: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer result.deinit();
+        try writer.print("status: {s}\n", .{@tagName(result.status)});
+        try writer.print("data: ", .{});
+        try printTerminalText(writer, result.data);
+        try writer.writeByte('\n');
+        return;
+    }
+    if (std.mem.eql(u8, raw[0], "serve")) {
+        const parsed = parseDeviceServe(raw[1..]) catch {
+            try writer.print(
+                "usage: device serve [--transport stdio|loopback] [--frames path] [--output path] [--subject s] [--region r] [--allow-active] [--audit path]\n",
+                .{},
+            );
+            return error.InvalidArguments;
+        };
+        var host: PocketRoot.DeviceHost = undefined;
+        host.init(allocator, io, .{
+            .region = parsed.region,
+            .allow_active = parsed.allow_active,
+            .subject = parsed.subject,
+            .audit_path = parsed.audit_path,
+        }) catch |err| {
+            try writer.print("device host rejected the options: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer host.deinit();
+
+        var read_buffer: [64 * 1024]u8 = undefined;
+        var file_reader: Io.File.Reader = undefined;
+        var frames_file: ?Io.File = null;
+        defer if (frames_file) |file| file.close(io);
+
+        if (parsed.transport == .loopback) {
+            const path = parsed.frames_path.?;
+            const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
+                std.debug.print("cannot open frame stream {s}: {s}\n", .{ path, @errorName(err) });
+                return error.CommandFailed;
+            };
+            frames_file = file;
+            file_reader = file.reader(io, &read_buffer);
+        } else {
+            file_reader = Io.File.stdin().reader(io, &read_buffer);
+        }
+
+        var output_file: ?Io.File = null;
+        defer if (output_file) |file| file.close(io);
+        var output_buffer: [4096]u8 = undefined;
+        var output_file_writer: Io.File.Writer = undefined;
+        var target_writer: *Io.Writer = writer;
+        if (parsed.output_path) |path| {
+            const file = Io.Dir.cwd().createFile(io, path, .{}) catch |err| {
+                std.debug.print("cannot create response stream {s}: {s}\n", .{ path, @errorName(err) });
+                return error.CommandFailed;
+            };
+            output_file = file;
+            output_file_writer = .init(file, io, &output_buffer);
+            target_writer = &output_file_writer.interface;
+        }
+
+        const served = host.serveStream(&file_reader.interface, target_writer, 0) catch |err| {
+            std.debug.print("device serve aborted: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        try target_writer.flush();
+        std.debug.print("device serve: {d} frame(s)\n", .{served});
+        return;
+    }
+    try writer.print("usage: device <info|request|serve> ...\n", .{});
+    return error.InvalidArguments;
+}
+
+fn runAuditCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var json_output = false;
+    var path: ?[]const u8 = null;
+    for (raw) |argument| {
+        if (std.mem.eql(u8, argument, "--json")) {
+            json_output = true;
+        } else if (std.mem.startsWith(u8, argument, "--")) {
+            try writer.print("usage: audit [--json] <audit.jsonl>\n", .{});
+            return error.InvalidArguments;
+        } else {
+            if (path != null) {
+                try writer.print("usage: audit [--json] <audit.jsonl>\n", .{});
+                return error.InvalidArguments;
+            }
+            path = argument;
+        }
+    }
+    const log_path = path orelse {
+        try writer.print("usage: audit [--json] <audit.jsonl>\n", .{});
+        return error.InvalidArguments;
+    };
+    const audit_log = PocketRoot.services.audit_log;
+    const data = Io.Dir.cwd().readFileAlloc(io, log_path, allocator, .limited(audit_log.max_file_bytes)) catch |err| {
+        try writer.print("cannot load audit log: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    const records = audit_log.parse(allocator, data) catch |err| {
+        try writer.print("invalid audit log {s}: {s}\n", .{ log_path, @errorName(err) });
+        return error.CommandFailed;
+    };
+    var summary = audit_log.Summary{};
+    for (records) |record| summary.count(record);
+
+    if (json_output) {
+        var json: std.json.Stringify = .{
+            .writer = writer,
+            .options = .{ .whitespace = .indent_2 },
+        };
+        try json.beginObject();
+        try writeJsonTextField(&json, "schema", audit_log.schema);
+        try json.objectField("summary");
+        try json.beginObject();
+        try writeJsonField(&json, "entries", summary.entries);
+        try writeJsonField(&json, "succeeded", summary.succeeded);
+        try writeJsonField(&json, "denied", summary.denied);
+        try writeJsonField(&json, "failed", summary.failed);
+        try writeJsonField(&json, "unsupported", summary.unsupported);
+        try writeJsonField(&json, "busy", summary.busy);
+        try writeJsonField(&json, "cancelled", summary.cancelled);
+        try writeJsonField(&json, "active_authorized", summary.active_authorized);
+        try writeJsonField(&json, "first_seq", summary.first_seq);
+        try writeJsonField(&json, "last_seq", summary.last_seq);
+        try writeJsonField(&json, "last_at_unix", summary.last_at_unix);
+        try json.endObject();
+        try json.objectField("entries");
+        try json.beginArray();
+        for (records) |record| {
+            try json.beginObject();
+            try writeJsonField(&json, "seq", record.seq);
+            try writeJsonField(&json, "request_id", record.request_id);
+            try writeJsonTextField(&json, "subject", record.subject);
+            try writeJsonTextField(&json, "kind", record.kind);
+            try writeJsonTextField(&json, "operation", record.operation);
+            try writeJsonTextField(&json, "status", record.status);
+            try writeJsonTextField(&json, "region", record.region);
+            try writeJsonField(&json, "active_authorized", record.active_authorized);
+            try writeJsonField(&json, "at_unix", record.at_unix);
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.endObject();
+        try writer.writeByte('\n');
+        return;
+    }
+
+    try writer.print(
+        "audit: {d} entries: succeeded={d} denied={d} failed={d} unsupported={d} busy={d} cancelled={d} active_authorized={d}\n",
+        .{
+            summary.entries,
+            summary.succeeded,
+            summary.denied,
+            summary.failed,
+            summary.unsupported,
+            summary.busy,
+            summary.cancelled,
+            summary.active_authorized,
+        },
+    );
+    const shown = @min(records.len, 100);
+    for (records[0..shown]) |record| {
+        try writer.print("  seq={d} request={d} subject=", .{ record.seq, record.request_id });
+        try printTerminalText(writer, record.subject);
+        try writer.print(" {s} {s} {s}", .{ record.kind, record.operation, record.status });
+        if (record.region.len > 0) {
+            try writer.print(" region=", .{});
+            try printTerminalText(writer, record.region);
+        }
+        if (record.active_authorized) try writer.print(" active_authorized=yes", .{});
+        try writer.writeByte('\n');
+    }
+    if (records.len > shown) try writer.print("  ... {d} more entries\n", .{records.len - shown});
+}
+
 fn printUsage(writer: *Io.Writer) !void {
     try writer.print(
         \\PocketRoot Zig simulator
@@ -785,7 +1157,11 @@ fn runScriptCommand(
     const emitted = executor.emitted();
     if (emitted.len > 0) {
         try writer.print("emitted: {d}\n", .{emitted.len});
-        for (emitted) |item| try writer.print("  {s} {s}\n", .{ item.severity, item.message });
+        for (emitted) |item| {
+            try writer.print("  {s} {s}", .{ item.severity, item.message });
+            if (item.payload.len > 0) try writer.print(" [tag={s}]", .{item.payload});
+            try writer.writeByte('\n');
+        }
     }
     return status == PocketRoot.services.workflow.Status.succeeded;
 }
@@ -1920,4 +2296,126 @@ test "script run without a library rejects sub-script imports" {
     const ok = try runScriptCommand(allocator, std.testing.io, tmp.dir, &writer, request);
     try std.testing.expect(!ok);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "UnknownScript") != null);
+}
+
+test "device argument parsing accepts requests and rejects unknown flags" {
+    const raw = [_][:0]const u8{
+        "subghz",
+        "transmit",
+        "--subject",
+        "host:test",
+        "--payload",
+        "frame",
+        "--region",
+        "EU",
+        "--allow-active",
+        "--authorize-active",
+    };
+    const parsed = try parseDeviceRequest(&raw);
+    try std.testing.expectEqual(PocketRoot.core.capability.Kind.subghz, parsed.kind);
+    try std.testing.expectEqual(PocketRoot.core.capability.Operation.transmit, parsed.operation);
+    try std.testing.expectEqualStrings("host:test", parsed.subject);
+    try std.testing.expectEqualStrings("frame", parsed.payload);
+    try std.testing.expectEqualStrings("EU", parsed.region);
+    try std.testing.expect(parsed.allow_active);
+    try std.testing.expect(parsed.authorize_active);
+
+    const unknown_flag = [_][:0]const u8{ "infrared", "read", "--nope" };
+    try std.testing.expectError(error.InvalidDeviceArgs, parseDeviceRequest(&unknown_flag));
+    const one_positional = [_][:0]const u8{"infrared"};
+    try std.testing.expectError(error.InvalidDeviceArgs, parseDeviceRequest(&one_positional));
+    const bad_kind = [_][:0]const u8{ "not-a-kind", "read" };
+    try std.testing.expectError(error.InvalidDeviceArgs, parseDeviceRequest(&bad_kind));
+
+    const loopback_without_frames = [_][:0]const u8{ "--transport", "loopback" };
+    try std.testing.expectError(error.InvalidDeviceArgs, parseDeviceServe(&loopback_without_frames));
+    const bad_transport = [_][:0]const u8{ "--transport", "serial" };
+    try std.testing.expectError(error.InvalidDeviceArgs, parseDeviceServe(&bad_transport));
+}
+
+test "device request writes an audit log that the audit command summarizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const audit_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/audit.jsonl",
+        .{tmp.sub_path[0..]},
+    );
+    const audit_z = try allocator.dupeZ(u8, audit_path);
+
+    var request_buffer: [4096]u8 = undefined;
+    var request_writer: Io.Writer = .fixed(&request_buffer);
+    const request_args = [_][:0]const u8{
+        "request",
+        "infrared",
+        "read",
+        "--payload",
+        "capture",
+        "--audit",
+        audit_z,
+    };
+    try runDeviceCommand(allocator, std.testing.io, &request_writer, &request_args);
+    const request_output = request_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, request_output, "status: succeeded") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request_output, "data: capture") != null);
+
+    var audit_buffer: [8192]u8 = undefined;
+    var audit_writer: Io.Writer = .fixed(&audit_buffer);
+    const audit_args = [_][:0]const u8{ "--json", audit_z };
+    try runAuditCommand(allocator, std.testing.io, &audit_writer, &audit_args);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, audit_writer.buffered(), .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("pocketroot.audit.v1", root.get("schema").?.string);
+    const summary = root.get("summary").?.object;
+    try std.testing.expectEqual(@as(i64, 1), summary.get("entries").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), summary.get("succeeded").?.integer);
+    const entries = root.get("entries").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("infrared", entries[0].object.get("kind").?.string);
+}
+
+test "device serve executes a recorded loopback frame stream" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const request = try PocketRoot.device.command.encodeRequest(allocator, 42, .{
+        .id = 0,
+        .subject = "ignored",
+        .kind = .infrared,
+        .operation = .read,
+        .payload = "capture",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "frames.pkrt", .data = request });
+
+    const frames_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/frames.pkrt",
+        .{tmp.sub_path[0..]},
+    );
+    const frames_z = try allocator.dupeZ(u8, frames_path);
+
+    var output_buffer: [1024]u8 = undefined;
+    var writer: Io.Writer = .fixed(&output_buffer);
+    const serve_args = [_][:0]const u8{
+        "serve",
+        "--transport",
+        "loopback",
+        "--frames",
+        frames_z,
+    };
+    try runDeviceCommand(allocator, std.testing.io, &writer, &serve_args);
+
+    const response = try PocketRoot.device.command.decodeResponse(writer.buffered());
+    try std.testing.expectEqual(PocketRoot.core.capability.Status.succeeded, response.status);
+    try std.testing.expectEqualStrings("capture", response.data);
 }

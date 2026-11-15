@@ -11,7 +11,7 @@ page summarises it.
 | Device protocol | `src/device/` | PKRT frames and the capability command wire format |
 | Format library | `src/formats/` | DNS/DHCP/DHCPv6/NBNS/SSDP, Flipper key-value files, TLS/X.509, Thumb |
 | Protocol plugins | `src/protocols/` | `ProtocolDescriptor` implementations and the pcap parser |
-| Services | `src/services/` | Scanning, capture, HTTP/TLS inspection, asset graph, vulnerability matching, projects, workflow, DSL |
+| Services | `src/services/` | Scanning, capture, HTTP/TLS inspection, asset graph, vulnerability matching, projects, workflow, DSL, device host and audit export |
 | Runtime | `src/simulator/`, `src/apps/` | `Runtime`, app model, simulated capability backend, loopback transport |
 | Shell | `src/cli/` | Argument parsing and three output projections (terminal, JSON, Markdown) |
 
@@ -45,7 +45,20 @@ command -> services/<x>.zig entry point (validates limits)
 
 The observation sockets currently run on the host process, not on dedicated hardware.
 
-### C. Asset graph and vulnerability matching
+### C. Capability host (device entry)
+
+```
+PKRT frame (stdin or --frames)
+  -> ipc.decode (CRC, exact length)
+  -> Session.accept (replay rejection)
+  -> device_host -> capability.Service.execute -> policy -> locks -> backend -> audit
+  -> device.command.encodeResponse -> stdout or --output
+```
+
+`device request` takes the same path without a frame, which is why both commands share one
+audit trail shape. The backend is still the simulator; only the transport is real.
+
+### D. Asset graph and vulnerability matching
 
 ```
 AnalysisResult.observations (many runs)
@@ -61,8 +74,8 @@ The asset graph is the only cross-analysis aggregation point (`services/asset_gr
 `simulator/runtime.zig` `Runtime` holds the allocator, event bus, storage, notification
 service, archive service, app manager and protocol registry. `context()` packages them
 into an `AppContext` for apps. The runtime holds no network state and no capability
-service; the capability kernel is used by the scripting layer rather than by the CLI
-commands.
+service; the capability kernel is used by the scripting layer and by the `device` host,
+not by the analysis commands.
 
 ## Extension points
 
@@ -71,7 +84,7 @@ commands.
 | Protocol/format | `ProtocolDescriptor` | Implement the analysis function (and optionally a sample generator), register it in `registry.builtinProtocols`, add a test, a fuzz seed and a smoke check |
 | Network service | Convention: return `AnalysisResult` and record observations | New `services/*.zig` plus a CLI branch; keep the module-top limit constants |
 | App | `AppDescriptor.entry` | Implement `run(*AppContext)` and register it in `root.zig` |
-| Capability backend | `capability.ExecuteFn` | Implement a real backend to replace the simulated one in `simulator/device.zig` |
+| Capability backend | `capability.ExecuteFn` | Implement a real backend to replace the simulated one in `simulator/device.zig`; the `device` host picks it up unchanged |
 
 ## Process and platform model
 
