@@ -12,10 +12,14 @@ jobs:
       - name: Checkout engine
         uses: actions/checkout@v4
 
-      # Optional catalog fixture (a separate private repo). Provide a VULNDB_TOKEN
-      # secret (fine-grained PAT, Contents: read) to run the catalog tests; without
-      # it the checkout fails, those tests return error.SkipZigTest and build.zig
-      # omits the vulns smoke step.
+      # The catalog repository declares "* -text", but set this anyway: a Windows
+      # runner's core.autocrlf would rewrite line endings and the manifest tests hash
+      # raw bytes. Keep the bytes exactly as committed.
+      - name: Keep checked-out bytes verbatim
+        run: git config --global core.autocrlf false
+
+      # Optional catalog fixture (a separate repository). If the checkout fails, the
+      # catalog tests return error.SkipZigTest and build.zig omits the vulns smoke step.
       - name: Checkout vulnerability db (optional)
         continue-on-error: true
         uses: actions/checkout@v4
