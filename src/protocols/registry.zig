@@ -11,6 +11,8 @@ const pcap = @import("pcap.zig");
 const subghz = @import("subghz.zig");
 const firmware = @import("firmware.zig");
 const cyclonedx = @import("cyclonedx.zig");
+const spdx = @import("spdx.zig");
+const npm_lock = @import("npm_lock.zig");
 
 const builtins = [_]protocol.ProtocolDescriptor{
     badusb.descriptor,
@@ -24,6 +26,8 @@ const builtins = [_]protocol.ProtocolDescriptor{
     subghz.descriptor,
     firmware.descriptor,
     cyclonedx.descriptor,
+    spdx.descriptor,
+    npm_lock.descriptor,
 };
 
 pub fn builtinProtocols() []const protocol.ProtocolDescriptor {

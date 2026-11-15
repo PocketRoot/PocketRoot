@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const purl_map = @import("../services/purl_map.zig");
 
 pub const descriptor = protocol.ProtocolDescriptor{
     .id = "cyclonedx",
@@ -15,19 +16,40 @@ pub const descriptor = protocol.ProtocolDescriptor{
 
 const max_components = 4096;
 
+const WireProperty = struct {
+    name: []const u8 = "",
+    value: []const u8 = "",
+};
+
 const WireComponent = struct {
     name: []const u8 = "",
     version: []const u8 = "",
     purl: []const u8 = "",
     group: []const u8 = "",
     type: []const u8 = "",
+    properties: []const WireProperty = &.{},
 };
+
+const WireMetadata = struct {
+    properties: []const WireProperty = &.{},
+};
+
+/// Property name a bill of materials can use to name the host it describes.
+pub const asset_property = "pocketroot:asset";
 
 const WireBom = struct {
     bomFormat: []const u8 = "",
     specVersion: []const u8 = "",
+    metadata: ?WireMetadata = null,
     components: []const WireComponent = &.{},
 };
+
+fn findAsset(properties: []const WireProperty) ?[]const u8 {
+    for (properties) |property| {
+        if (std.mem.eql(u8, property.name, asset_property) and property.value.len != 0) return property.value;
+    }
+    return null;
+}
 
 /// Reads a CycloneDX JSON bill of materials and emits one package observation per
 /// component that carries both a name and a version.
@@ -53,6 +75,7 @@ pub fn analyzeText(allocator: std.mem.Allocator, data: []const u8) !protocol.Ana
     if (bom.specVersion.len != 0) try result.addField("spec_version", bom.specVersion);
     try result.addNumberField("components_total", bom.components.len);
 
+    const default_asset = if (bom.metadata) |metadata| findAsset(metadata.properties) else null;
     var with_version: usize = 0;
     var with_purl: usize = 0;
     for (bom.components) |component| {
@@ -60,6 +83,10 @@ pub fn analyzeText(allocator: std.mem.Allocator, data: []const u8) !protocol.Ana
         with_version += 1;
         const purl = if (component.purl.len != 0) component.purl else "";
         if (purl.len != 0) with_purl += 1;
+
+        const mapped = if (purl.len != 0) purl_map.resolve(purl) else null;
+        const product = if (mapped) |entry| entry.product else component.name;
+        const asset = findAsset(component.properties) orelse default_asset orelse "";
 
         var identity_buffer: [320]u8 = undefined;
         const identity = if (purl.len != 0)
@@ -70,8 +97,9 @@ pub fn analyzeText(allocator: std.mem.Allocator, data: []const u8) !protocol.Ana
         _ = try result.addNetworkObservation(.{
             .kind = .package,
             .confidence = .confirmed,
+            .address = asset,
             .hostname = identity,
-            .product = component.name,
+            .product = product,
             .version = component.version,
             .evidence = if (component.group.len != 0) component.group else "cyclonedx",
             .source_id = "cyclonedx:component",
@@ -116,7 +144,8 @@ test "cyclonedx components become package observations" {
     try std.testing.expectEqual(@as(usize, 1), result.observations.items.len);
     const observation = result.observations.items[0];
     try std.testing.expectEqual(protocol.NetworkObservationKind.package, observation.kind);
-    try std.testing.expectEqualStrings("log4j-core", observation.product);
+    // The purl namespace maps the artefact to its catalogue product.
+    try std.testing.expectEqualStrings("log4j", observation.product);
     try std.testing.expectEqualStrings("2.14.1", observation.version);
     try std.testing.expect(std.mem.startsWith(u8, observation.hostname, "pkg:maven/"));
 }

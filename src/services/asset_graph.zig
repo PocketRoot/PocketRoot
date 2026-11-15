@@ -11,6 +11,8 @@ pub const max_sources_per_asset = 512;
 pub const IdentityKind = enum {
     address,
     hostname,
+    /// A purl recorded by a software inventory. It names a component, not a host.
+    package,
 };
 
 pub const Identity = struct {
@@ -87,7 +89,7 @@ pub const Asset = struct {
             const rank = confidenceRank(identity.confidence);
             const best_rank = confidenceRank(best.confidence);
             if (rank > best_rank or
-                (rank == best_rank and identity.kind == .hostname and best.kind == .address))
+                (rank == best_rank and identityRank(identity.kind) > identityRank(best.kind)))
             {
                 best_index = index;
             }
@@ -126,10 +128,11 @@ pub const AssetGraph = struct {
             null
         else
             self.findIdentity(.address, observation.address);
+        const identity_kind: IdentityKind = if (observation.kind == .package) .package else .hostname;
         const hostname_index = if (!associate_hostname or observation.hostname.len == 0)
             null
         else
-            self.findIdentity(.hostname, observation.hostname);
+            self.findIdentity(identity_kind, observation.hostname);
 
         var asset_index = address_index orelse hostname_index orelse try self.addAsset();
         if (address_index != null and hostname_index != null and address_index.? != hostname_index.?) {
@@ -148,7 +151,7 @@ pub const AssetGraph = struct {
         if (associate_hostname and observation.hostname.len != 0) {
             _ = try self.addIdentity(
                 asset_index,
-                .hostname,
+                identity_kind,
                 observation.hostname,
                 observation.confidence,
                 observation.source_id,
@@ -381,10 +384,20 @@ fn addUniqueSource(
     try sources.append(allocator, owned);
 }
 
+/// A human-readable hostname names an asset better than a bare address, and both name it
+/// better than a purl recorded by a software inventory.
+fn identityRank(kind: IdentityKind) u2 {
+    return switch (kind) {
+        .hostname => 2,
+        .address => 1,
+        .package => 0,
+    };
+}
+
 fn identityEqual(kind: IdentityKind, left: []const u8, right: []const u8) bool {
     return switch (kind) {
         .address => addressEqual(left, right),
-        .hostname => hostnameEqual(left, right),
+        .hostname, .package => hostnameEqual(left, right),
     };
 }
 
