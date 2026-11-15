@@ -24,6 +24,11 @@ pub const Sample = struct {
     }
 };
 
+pub const LiteralRef = struct {
+    address: u32,
+    instruction: u32,
+};
+
 pub const Listing = struct {
     instructions: usize = 0,
     unknown: usize = 0,
@@ -33,10 +38,12 @@ pub const Listing = struct {
     samples: [max_samples]Sample = @splat(Sample{}),
     sample_count: usize = 0,
     branch_targets: []u32 = &.{},
+    literals: []LiteralRef = &.{},
 
     pub fn deinit(self: *Listing, allocator: Allocator) void {
         if (self.entries.len > 0) allocator.free(self.entries);
         if (self.branch_targets.len > 0) allocator.free(self.branch_targets);
+        if (self.literals.len > 0) allocator.free(self.literals);
         self.* = undefined;
     }
 };
@@ -48,6 +55,8 @@ const Decoded = struct {
     operands_len: u8 = 0,
     branch_target: ?u32 = null,
     call_target: ?u32 = null,
+    /// Set for pc-relative data loads (LDR literal, ADR); used for string xrefs.
+    literal: ?u32 = null,
 };
 
 fn regName(index: u3) []const u8 {
@@ -182,7 +191,7 @@ fn decode16(halfword: u16, address: u32) Decoded {
     }
 
     // 010000: data processing (register)
-    if (top4 == 0b0100 and ((halfword >> 10) & 1) == 0) {
+    if ((halfword >> 10) == 0b010000) {
         const op = (halfword >> 6) & 0x0f;
         const rd = @as(u3, @truncate(halfword & 0x7));
         const rm = @as(u3, @truncate((halfword >> 3) & 0x7));
@@ -209,7 +218,7 @@ fn decode16(halfword: u16, address: u32) Decoded {
     }
 
     // 010001: special data / branch exchange
-    if (top4 == 0b0100 and ((halfword >> 10) & 1) == 1) {
+    if ((halfword >> 10) == 0b010001) {
         const op = (halfword >> 8) & 0b11;
         const rm = @as(u4, @truncate((halfword >> 3) & 0x0f));
         const rd = @as(u4, @truncate(((halfword >> 4) & 0x08) | (halfword & 0x07)));
@@ -237,7 +246,7 @@ fn decode16(halfword: u16, address: u32) Decoded {
     }
 
     // 01001: LDR literal
-    if (top4 == 0b0100 and ((halfword >> 11) & 0b11111) == 0b01001) {
+    if ((halfword >> 11) == 0b01001) {
         const rt = @as(u3, @truncate((halfword >> 8) & 0x7));
         const imm8 = halfword & 0xff;
         decoded.mnemonic = "ldr";
@@ -245,6 +254,7 @@ fn decode16(halfword: u16, address: u32) Decoded {
         const target = literal + (@as(u32, imm8) << 2);
         fmt(&decoded, "{s}, [pc, #0x{x}]", .{ regName(rt), imm8 << 2 });
         decoded.branch_target = target;
+        decoded.literal = target;
         return decoded;
     }
 
@@ -312,6 +322,7 @@ fn decode16(halfword: u16, address: u32) Decoded {
             const target = ((address + 4) & 0xffff_fffc) + (@as(u32, imm8) << 2);
             fmt(&decoded, "{s}, #0x{x:0>8}", .{ regName(rd), target });
             decoded.branch_target = target;
+            decoded.literal = target;
         }
         return decoded;
     }
@@ -398,6 +409,8 @@ pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_o
     var listing = Listing{};
     var targets: std.ArrayList(u32) = .empty;
     defer targets.deinit(allocator);
+    var literals: std.ArrayList(LiteralRef) = .empty;
+    defer literals.deinit(allocator);
 
     const max_targets = 4096;
     var offset: usize = @min(start_offset, data.len);
@@ -408,6 +421,11 @@ pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_o
         listing.bytes += decoded.length;
         if (std.mem.eql(u8, decoded.mnemonic, "undefined")) listing.unknown += 1;
 
+        if (decoded.literal) |target| {
+            if (literals.items.len < max_targets) {
+                literals.append(allocator, .{ .address = target, .instruction = address }) catch {};
+            }
+        }
         if (decoded.call_target) |target| {
             if (targets.items.len < max_targets and inImage(target, base_address, data.len)) {
                 targets.append(allocator, target) catch {};
@@ -452,6 +470,7 @@ pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_o
     }
     listing.functions = unique;
     listing.entries = try allocator.dupe(u32, targets.items[0..unique]);
+    listing.literals = try allocator.dupe(LiteralRef, literals.items);
     listing.branch_targets = &.{};
     return listing;
 }

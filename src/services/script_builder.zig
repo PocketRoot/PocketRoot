@@ -21,7 +21,12 @@ pub const Error = error{
     MissingCapability,
     TickBudgetExceeded,
     UnsupportedCondition,
+    UnknownScript,
+    ScriptCycle,
+    ScriptDepthExceeded,
 };
+
+pub const max_run_depth = 8;
 
 /// The embedder (CLI / tests) stamps authorization decisions that a script must not
 /// be able to grant itself: active-operation consent and the policy region.
@@ -72,6 +77,8 @@ pub const Compiled = struct {
 
 const Compiler = struct {
     a: Allocator,
+    library: ?*const script.Library = null,
+    run_stack: std.ArrayList([]const u8) = .empty,
     steps: std.ArrayList(workflow.Step) = .empty,
     actions: std.ArrayList(automation.ActionSpec) = .empty,
     conditions: std.ArrayList(automation.ConditionSpec) = .empty,
@@ -79,7 +86,9 @@ const Compiler = struct {
     counter: usize = 0,
 
     fn nextId(self: *Compiler, prefix: []const u8) Error![]const u8 {
-        return std.fmt.allocPrint(self.a, "{s}:{d}", .{ prefix, self.counter }) catch error.OutOfMemory;
+        const id = std.fmt.allocPrint(self.a, "{s}:{d}", .{ prefix, self.counter }) catch return error.OutOfMemory;
+        self.counter += 1;
+        return id;
     }
 
     fn addAction(
@@ -91,7 +100,6 @@ const Compiler = struct {
         self.steps.append(self.a, .{ .action = .{ .id = id, .max_attempts = attempts, .timeout_ms = 0 } }) catch return error.OutOfMemory;
         self.actions.append(self.a, spec) catch return error.OutOfMemory;
         self.step_ids.append(self.a, id) catch return error.OutOfMemory;
-        self.counter += 1;
     }
 
     fn addCondition(self: *Compiler, spec: automation.ConditionSpec) Error!usize {
@@ -126,10 +134,13 @@ const Compiler = struct {
     ) Error!void {
         const cap = source.capByName(call.cap) orelse return error.MissingCapability;
         const mapping = verbMapping(cap.verb) orelse return error.UnsupportedVerb;
+        // Ids are per call site, not per cap name: two scripts (or two branches) may
+        // declare the same name with different payloads.
+        const id = try self.nextId("call");
         try self.addAction(
-            cap.name,
+            id,
             .{
-                .id = cap.name,
+                .id = id,
                 .subject = subject,
                 .kind = mapping.kind,
                 .operation = mapping.operation,
@@ -140,6 +151,33 @@ const Compiler = struct {
             },
             attemptLimit(cap),
         );
+    }
+
+    /// Inlines a sub-script: its steps are compiled into the caller in place, so
+    /// retries, checkpoints and audit stay in the same workflow run. Cycles and deep
+    /// nesting are rejected rather than truncated.
+    fn emitRun(
+        self: *Compiler,
+        source: *const script.Script,
+        subject: []const u8,
+        options: CompileOptions,
+        run: script.Run,
+    ) Error!void {
+        _ = source;
+        _ = subject;
+        const library = self.library orelse return error.UnknownScript;
+        const target = library.find(run.name) orelse return error.UnknownScript;
+        for (self.run_stack.items) |active| {
+            if (std.mem.eql(u8, active, run.name)) return error.ScriptCycle;
+        }
+        if (self.run_stack.items.len >= max_run_depth) return error.ScriptDepthExceeded;
+        self.run_stack.append(self.a, run.name) catch return error.OutOfMemory;
+        defer _ = self.run_stack.pop();
+
+        const sub_subject = std.fmt.allocPrint(self.a, "{s}{s}", .{ subject_prefix, target.name }) catch return error.OutOfMemory;
+        for (target.steps) |step| {
+            try self.emitStatements(target, sub_subject, options, step.body);
+        }
     }
 
     fn emitStatements(
@@ -167,6 +205,7 @@ const Compiler = struct {
                         .emit = spec.emit,
                     }, 1);
                 },
+                .run => |run| try self.emitRun(source, subject, options, run),
                 .if_stmt => |branch| try self.emitIf(source, subject, options, branch),
                 .for_stmt => |loop| try self.emitFor(source, subject, options, loop),
             }
@@ -259,12 +298,21 @@ const Compiler = struct {
 };
 
 pub fn compile(allocator: Allocator, source: *const script.Script, options: CompileOptions) Error!Compiled {
+    return compileWithLibrary(allocator, source, options, null);
+}
+
+pub fn compileWithLibrary(
+    allocator: Allocator,
+    source: *const script.Script,
+    options: CompileOptions,
+    library: ?*const script.Library,
+) Error!Compiled {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
 
     const subject = std.fmt.allocPrint(a, "{s}{s}", .{ subject_prefix, source.name }) catch return error.OutOfMemory;
-    var compiler = Compiler{ .a = a };
+    var compiler = Compiler{ .a = a, .library = library };
     for (source.steps) |dsl_step| {
         try compiler.emitStatements(source, subject, options, dsl_step.body);
     }
@@ -406,7 +454,18 @@ pub const Executor = struct {
         service: *capability.Service,
         options: CompileOptions,
     ) Error!void {
-        self.compiled = try compile(allocator, source, options);
+        return self.initWithLibrary(allocator, source, service, options, null);
+    }
+
+    pub fn initWithLibrary(
+        self: *Executor,
+        allocator: Allocator,
+        source: *const script.Script,
+        service: *capability.Service,
+        options: CompileOptions,
+        library: ?*const script.Library,
+    ) Error!void {
+        self.compiled = try compileWithLibrary(allocator, source, options, library);
         self.engine.init(service, self.compiled.actions) catch |err| {
             self.compiled.deinit();
             return switch (err) {
@@ -509,6 +568,7 @@ test "evaluates a branch at runtime from a bound variable" {
 test "takes the else branch when the condition is false" {
     var source = try script.parse(std.testing.allocator,
         \\script "branch-false" do
+        \\    use "pack.rf"
         \\    cap rf = subghz.read
         \\    step "s" do
         \\        sig = rf { payload = "protocol=Other" }
@@ -539,6 +599,7 @@ test "takes the else branch when the condition is false" {
 test "unrolls a bounded for loop and binds the counter" {
     var source = try script.parse(std.testing.allocator,
         \\script "loop" do
+        \\    use "pack.rf"
         \\    cap rf = subghz.read
         \\    step "s" do
         \\        for i = 1, 3 do
@@ -572,6 +633,7 @@ test "unrolls a bounded for loop and binds the counter" {
 test "out exports a variable to the following step" {
     var source = try script.parse(std.testing.allocator,
         \\script "export" do
+        \\    use "pack.rf"
         \\    cap rf = subghz.read
         \\    step "capture" do
         \\        sig = rf { payload = "protocol=Princeton" }
@@ -603,6 +665,7 @@ test "out exports a variable to the following step" {
 test "rejects conditions that reference unknown variables" {
     try std.testing.expectError(error.UnknownVariable, script.parse(std.testing.allocator,
         \\script "bad" do
+        \\    use "pack.rf"
         \\    cap rf = subghz.read
         \\    step "s" do
         \\        if ghost.value == "x" then
@@ -616,6 +679,7 @@ test "rejects conditions that reference unknown variables" {
 test "rejects mixed and/or chains and comparing against a variable" {
     var mixed = try script.parse(std.testing.allocator,
         \\script "mixed" do
+        \\    use "pack.rf"
         \\    cap rf = subghz.read
         \\    step "s" do
         \\        a = rf { payload = "x=1" }
@@ -631,6 +695,7 @@ test "rejects mixed and/or chains and comparing against a variable" {
 
     var against = try script.parse(std.testing.allocator,
         \\script "against" do
+        \\    use "pack.rf"
         \\    cap rf = subghz.read
         \\    step "s" do
         \\        a = rf { payload = "x=1" }
@@ -648,6 +713,7 @@ test "rejects mixed and/or chains and comparing against a variable" {
 test "stop truncates the remaining script" {
     var source = try script.parse(std.testing.allocator,
         \\script "stopper" do
+        \\    use "pack.rf"
         \\    cap rf_capture = subghz.read
         \\    step "one" do
         \\        rf_capture { payload = "a" }
@@ -666,6 +732,7 @@ test "stop truncates the remaining script" {
 test "active operations are denied without policy authorization" {
     var source = try script.parse(std.testing.allocator,
         \\script "tx" do
+        \\    use "pack.rf"
         \\    cap rf_tx = subghz.transmit
         \\    step "send" do
         \\        rf_tx { payload = "frame" }
@@ -691,5 +758,84 @@ test "active operations are denied without policy authorization" {
 test "every DSL verb has a capability mapping" {
     for (verb_map) |mapping| {
         try std.testing.expect(verbMapping(mapping.verb) != null);
+    }
+}
+
+test "inlines a sub-script into the caller" {
+    var helper = try script.parse(std.testing.allocator,
+        \\script "helper" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "capture" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        out sig
+        \\    end
+        \\end
+    );
+    defer helper.deinit();
+
+    const library = script.Library{ .entries = &.{.{ .name = "helper", .script = &helper }} };
+    var caller = try script.parseWithLibrary(std.testing.allocator,
+        \\script "caller" do
+        \\    use "pack.rf"
+        \\    use "script:helper"
+        \\    cap rf = subghz.read
+        \\    step "decide" do
+        \\        run "helper"
+        \\        if sig.protocol == "Princeton" then
+        \\            rf { payload = "after" }
+        \\        else
+        \\            emit warning "miss"
+        \\        end
+        \\    end
+        \\end
+    , &library);
+    defer caller.deinit();
+
+    var harness: simulated_device.Harness = undefined;
+    harness.init(std.testing.allocator, .{});
+    defer harness.deinit();
+    harness.backend.enable(.subghz);
+
+    var executor: Executor = undefined;
+    try executor.initWithLibrary(std.testing.allocator, &caller, &harness.capabilities, .{}, &library);
+    defer executor.deinit();
+
+    try std.testing.expectEqual(workflow.Status.succeeded, try executor.run());
+    try std.testing.expectEqual(@as(usize, 2), harness.capabilities.audit.entries.items.len);
+    try std.testing.expectEqualStrings("script:helper", harness.capabilities.audit.entries.items[0].subject);
+    try std.testing.expectEqualStrings("script:caller", harness.capabilities.audit.entries.items[1].subject);
+    try std.testing.expectEqual(@as(usize, 0), executor.emitted().len);
+}
+
+test "each if site gets its own condition spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "two-branches" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        a = rf { payload = "x=1" }
+        \\        if a.x == "1" then
+        \\            emit info "one"
+        \\        end
+        \\        if a.x == "2" then
+        \\            emit info "two"
+        \\        end
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+
+    // Two comparisons plus their two trampoline jumps.
+    try std.testing.expectEqual(@as(usize, 4), compiled.conditions.len);
+    try std.testing.expectEqualStrings("1", compiled.conditions[0].literal);
+    try std.testing.expectEqualStrings("2", compiled.conditions[2].literal);
+    for (compiled.conditions, 0..) |left, i| {
+        for (compiled.conditions[i + 1 ..]) |right| {
+            try std.testing.expect(!std.mem.eql(u8, left.id, right.id));
+        }
     }
 }

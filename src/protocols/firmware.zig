@@ -11,6 +11,10 @@ const thumb = @import("../formats/thumb.zig");
 pub const block_size = 1024;
 pub const max_entropy_blocks = 4096;
 pub const max_preview_strings = 8;
+pub const max_string_refs = 64;
+pub const max_xref_lines = 4;
+
+const StringRef = struct { offset: usize, length: usize };
 pub const max_string_bytes = 48;
 pub const min_string_len = 4;
 pub const high_entropy_x100: u32 = 700;
@@ -68,6 +72,8 @@ fn scanAscii(
     stats: *StringStats,
     previews: *[max_preview_strings][]const u8,
     preview_count: *usize,
+    refs: *[max_string_refs]StringRef,
+    ref_count: *usize,
 ) void {
     var index: usize = 0;
     while (index < data.len) {
@@ -85,6 +91,10 @@ fn scanAscii(
             const clipped = @min(length, max_string_bytes);
             previews[preview_count.*] = data[start .. start + clipped];
             preview_count.* += 1;
+        }
+        if (ref_count.* < max_string_refs) {
+            refs[ref_count.*] = .{ .offset = start, .length = length };
+            ref_count.* += 1;
         }
     }
 }
@@ -117,7 +127,16 @@ pub const VectorTable = struct {
     valid: bool,
 };
 
-pub fn inspectVectorTable(data: []const u8, base_address: u32) ?VectorTable {
+pub fn containingFunction(entries: []const u32, instruction: u32) u32 {
+    var owner: u32 = 0;
+    for (entries) |entry| {
+        if (entry > instruction) break;
+        owner = entry;
+    }
+    return owner;
+}
+
+fn inspectVectorTable(data: []const u8, base_address: u32) ?VectorTable {
     if (data.len < 8) return null;
     const initial_sp = std.mem.readInt(u32, data[0..4], .little);
     const reset = std.mem.readInt(u32, data[4..8], .little);
@@ -180,7 +199,9 @@ pub fn analyzeWith(
     var stats = StringStats{};
     var previews: [max_preview_strings][]const u8 = @splat("");
     var preview_count: usize = 0;
-    scanAscii(data, &stats, &previews, &preview_count);
+    var string_refs: [max_string_refs]StringRef = @splat(.{ .offset = 0, .length = 0 });
+    var string_ref_count: usize = 0;
+    scanAscii(data, &stats, &previews, &preview_count, &string_refs, &string_ref_count);
     scanUtf16(data, &stats);
 
     const table = inspectVectorTable(data, options.base_address);
@@ -204,6 +225,38 @@ pub fn analyzeWith(
         }
         listing = thumb.decode(allocator, data, options.base_address, start_offset) catch .{};
         decoded = true;
+    }
+
+    // Stage F3: literal-pool cross references. Each printable string is compared with
+    // the pc-relative data loads found while decoding; every hit names the loading
+    // instruction and the function that contains it.
+    var xref_count: usize = 0;
+    var referenced_strings: usize = 0;
+    var xref_buffers: [max_xref_lines][96]u8 = undefined;
+    var xref_lengths: [max_xref_lines]usize = @splat(0);
+    if (decoded and listing.literals.len > 0) {
+        var ref_index: usize = 0;
+        while (ref_index < string_ref_count) : (ref_index += 1) {
+            const ref = string_refs[ref_index];
+            const address = options.base_address + @as(u32, @intCast(ref.offset));
+            for (listing.literals) |literal| {
+                if (literal.address != address) continue;
+                referenced_strings += 1;
+                if (xref_count < max_xref_lines) {
+                    const clipped = @min(ref.length, max_string_bytes);
+                    const text = data[ref.offset .. ref.offset + clipped];
+                    const owner = containingFunction(listing.entries, literal.instruction);
+                    const line = std.fmt.bufPrint(
+                        &xref_buffers[xref_count],
+                        "\"{s}\" <- 0x{x:0>8} in 0x{x:0>8}",
+                        .{ text, literal.instruction, owner },
+                    ) catch "";
+                    xref_lengths[xref_count] = line.len;
+                    xref_count += 1;
+                }
+                break;
+            }
+        }
     }
 
     var summary_buffer: [192]u8 = undefined;
@@ -267,6 +320,15 @@ pub fn analyzeWith(
             ((listing.instructions - listing.unknown) * 100) / listing.instructions;
         try result.addNumberField("decode_coverage_x100", coverage);
         try result.addNumberField("functions", listing.functions);
+        try result.addNumberField("literal_refs", listing.literals.len);
+        try result.addNumberField("strings_referenced", referenced_strings);
+
+        var xref_index: usize = 0;
+        while (xref_index < xref_count) : (xref_index += 1) {
+            var key_buffer: [24]u8 = undefined;
+            const key = try std.fmt.bufPrint(&key_buffer, "xref_{d}", .{xref_index + 1});
+            try result.addField(key, xref_buffers[xref_index][0..xref_lengths[xref_index]]);
+        }
 
         var entry_index: usize = 0;
         while (entry_index < listing.entries.len and entry_index < 3) : (entry_index += 1) {
@@ -404,6 +466,25 @@ test "block entropy bounds" {
     }
     const value = blockEntropyX100(&uniform);
     try std.testing.expect(value >= 795 and value <= 805);
+}
+
+test "links literal-pool loads to strings" {
+    var image = [_]u8{0} ** 48;
+    std.mem.writeInt(u32, image[0..4], 0x2000_1000, .little);
+    std.mem.writeInt(u32, image[4..8], 0x0800_0009, .little);
+    // 0x08000008: ldr r0, [pc, #0] -> literal base (0x08000008 + 4) & ~3 = 0x0800000c
+    image[8] = 0x00;
+    image[9] = 0x48;
+    const text = "PocketRoot";
+    @memcpy(image[12 .. 12 + text.len], text);
+
+    var result = try analyzeWith(std.testing.allocator, &image, .{ .base_address = 0x0800_0000 });
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("1", findField(&result, "strings_referenced").?);
+    const xref = findField(&result, "xref_1").?;
+    try std.testing.expect(std.mem.indexOf(u8, xref, "PocketRoot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xref, "0x08000008") != null);
 }
 
 test "decodes Thumb and reports coverage metrics" {

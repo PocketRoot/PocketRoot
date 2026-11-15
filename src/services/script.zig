@@ -47,6 +47,11 @@ pub const Error = error{
     InvalidNumber,
     InvalidLoopBound,
     UnknownVariable,
+    UnknownPack,
+    PackNotImported,
+    UnknownScript,
+    ScriptCycle,
+    ScriptDepthExceeded,
 };
 
 pub const Diagnostic = struct {
@@ -112,7 +117,7 @@ const keywords = [_][]const u8{
     "script", "do",    "end",  "use",     "budget", "cap",     "step",
     "emit",   "stop",  "info", "warning", "error",  "finding", "from_policy",
     "true",   "false", "if",   "then",    "elseif", "else",    "for",
-    "out",    "and",   "or",   "not",
+    "out",    "and",   "or",   "not",     "run",
 };
 
 fn keywordKind(text: []const u8) bool {
@@ -183,6 +188,20 @@ pub const Cond = struct {
 
 pub const Out = struct { name: []const u8, line: u32 };
 
+pub const Run = struct { name: []const u8, line: u32 };
+
+/// A named sub-script the caller can inline with "run".
+pub const LibraryEntry = struct { name: []const u8, script: *const Script };
+
+pub const Library = struct {
+    entries: []const LibraryEntry = &.{},
+
+    pub fn find(self: *const Library, name: []const u8) ?*const Script {
+        for (self.entries) |entry| if (std.mem.eql(u8, entry.name, name)) return entry.script;
+        return null;
+    }
+};
+
 pub const If = struct {
     cond: Cond,
     then_body: []Stmt,
@@ -203,6 +222,7 @@ pub const Stmt = union(enum) {
     emit: Emit,
     stop: void,
     out: Out,
+    run: Run,
     if_stmt: If,
     for_stmt: For,
 };
@@ -217,6 +237,12 @@ pub const Script = struct {
     budget: ?Budget,
     caps: []Cap,
     steps: []Step,
+    /// Names exported with "out" at step level; visible to a caller that runs this script.
+    exports: []const []const u8 = &.{},
+    /// Sub-script names declared with use "script:<name>".
+    script_imports: []const []const u8 = &.{},
+    /// Sub-script names actually referenced by run statements.
+    runs: []const []const u8 = &.{},
 
     pub fn deinit(self: *Script) void {
         self.arena.deinit();
@@ -255,6 +281,37 @@ const option_keys = [_][]const u8{
 fn verbInfo(name: []const u8) ?VerbInfo {
     for (verbs) |item| if (std.mem.eql(u8, item.name, name)) return item;
     return null;
+}
+
+const PackEntry = struct { name: []const u8, verbs: []const []const u8 };
+
+/// Packs are the capability surface a script must opt into with "use". A verb that
+/// belongs to no pack cannot be imported, which keeps the compiler honest when new
+/// verbs are added.
+const packs = [_]PackEntry{
+    .{ .name = "pack.rf", .verbs = &.{ "subghz.read", "subghz.transmit", "lfrfid.read", "ibutton.read" } },
+    .{ .name = "pack.nfc", .verbs = &.{ "nfc.read", "nfc.emulate" } },
+    .{ .name = "pack.ir", .verbs = &.{ "ir.receive", "ir.transmit" } },
+    .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan" } },
+    .{ .name = "pack.fs", .verbs = &.{ "fs.read", "fs.write" } },
+};
+
+pub fn packKnown(name: []const u8) bool {
+    for (packs) |entry| if (std.mem.eql(u8, entry.name, name)) return true;
+    return false;
+}
+
+pub fn packForVerb(verb: []const u8) ?[]const u8 {
+    for (packs) |entry| {
+        for (entry.verbs) |candidate| {
+            if (std.mem.eql(u8, candidate, verb)) return entry.name;
+        }
+    }
+    return null;
+}
+
+pub fn packNames() []const []const u8 {
+    return &.{ "pack.rf", "pack.nfc", "pack.ir", "pack.net", "pack.fs" };
 }
 
 fn allowedOptionKey(name: []const u8) bool {
@@ -360,6 +417,7 @@ fn lex(arena: Allocator, source: []const u8) Error![]Token {
 const Parser = struct {
     tokens: []const Token,
     allocator: Allocator,
+    library: ?*const Library = null,
     index: usize = 0,
     diag: ?Diagnostic = null,
 
@@ -543,6 +601,11 @@ const Parser = struct {
             _ = self.advance();
             const name = try self.expectKind(.ident);
             return .{ .out = .{ .name = name.text, .line = name.line } };
+        }
+        if (isKw(token, "run")) {
+            _ = self.advance();
+            const name = try self.expectKind(.string);
+            return .{ .run = .{ .name = name.text, .line = name.line } };
         }
         if (isKw(token, "if")) return .{ .if_stmt = try self.parseIf() };
         if (isKw(token, "for")) return .{ .for_stmt = try self.parseFor() };
@@ -911,6 +974,13 @@ pub fn parse(allocator: Allocator, data: []const u8) Error!Script {
 }
 
 pub fn parseDetailed(allocator: Allocator, data: []const u8) Error!Script {
+    return parseWithLibrary(allocator, data, null);
+}
+
+/// Parses and validates a script against a library of sub-scripts. "run" and
+/// use "script:<name>" only resolve when the library is supplied, so a script that
+/// composes others cannot be validated in isolation.
+pub fn parseWithLibrary(allocator: Allocator, data: []const u8, library: ?*const Library) Error!Script {
     if (data.len > max_script_bytes) return error.ScriptTooLarge;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -920,7 +990,7 @@ pub fn parseDetailed(allocator: Allocator, data: []const u8) Error!Script {
     const source = try arena_allocator.dupe(u8, data);
     const tokens = try lex(arena_allocator, source);
 
-    var parser = Parser{ .tokens = tokens, .allocator = arena_allocator };
+    var parser = Parser{ .tokens = tokens, .allocator = arena_allocator, .library = library };
 
     parser.skipNewlines();
     if (parser.peek().kind == .eof) return error.EmptyScript;
@@ -1025,34 +1095,6 @@ fn validateCapOptions(parser: *Parser, cap: Cap) Error!void {
     }
 }
 
-fn validateScript(parser: *Parser, script: *Script) Error!void {
-    for (script.uses) |usage| {
-        if (usage.path.len == 0 or usage.path.len > max_name_bytes) {
-            parser.note(usage.line, "use path");
-            return error.InvalidUse;
-        }
-        if (!std.mem.startsWith(u8, usage.path, "pack.")) {
-            parser.note(usage.line, "use pack.<name>");
-            return error.InvalidUse;
-        }
-    }
-
-    for (script.caps) |cap| try validateCapOptions(parser, cap);
-
-    var exported: std.ArrayList([]const u8) = .empty;
-    defer exported.deinit(parser.allocator);
-
-    for (script.steps, 0..) |step, index| {
-        for (script.steps[0..index]) |previous| {
-            if (std.mem.eql(u8, previous.name, step.name)) {
-                parser.note(step.line, "step name");
-                return error.InvalidScriptName;
-            }
-        }
-        try validateStep(parser, script, step, &exported);
-    }
-}
-
 fn nameIn(names: []const []const u8, name: []const u8) bool {
     for (names) |item| if (std.mem.eql(u8, item, name)) return true;
     return false;
@@ -1062,32 +1104,115 @@ fn declareName(allocator: Allocator, list: *std.ArrayList([]const u8), name: []c
     if (!nameIn(list.items, name)) list.append(allocator, name) catch return error.TooManyItems;
 }
 
-fn validateStep(
+const ValidateContext = struct {
     parser: *Parser,
     script: *const Script,
-    step: Step,
+    packs: *std.ArrayList([]const u8),
+    script_imports: *std.ArrayList([]const u8),
     exported: *std.ArrayList([]const u8),
-) Error!void {
-    // visible = everything readable (exported names + locals of this scope)
+    runs: *std.ArrayList([]const u8),
+};
+
+fn validateScript(parser: *Parser, script: *Script) Error!void {
+    var imported_packs: std.ArrayList([]const u8) = .empty;
+    defer imported_packs.deinit(parser.allocator);
+    var script_imports: std.ArrayList([]const u8) = .empty;
+    defer script_imports.deinit(parser.allocator);
+    var exported: std.ArrayList([]const u8) = .empty;
+    defer exported.deinit(parser.allocator);
+    var runs: std.ArrayList([]const u8) = .empty;
+    defer runs.deinit(parser.allocator);
+
+    for (script.uses) |usage| {
+        if (usage.path.len == 0 or usage.path.len > max_name_bytes) {
+            parser.note(usage.line, "use path");
+            return error.InvalidUse;
+        }
+        if (std.mem.startsWith(u8, usage.path, "pack.")) {
+            if (!packKnown(usage.path)) {
+                parser.note(usage.line, "unknown pack");
+                return error.UnknownPack;
+            }
+            try declareName(parser.allocator, &imported_packs, usage.path);
+        } else if (std.mem.startsWith(u8, usage.path, "script:")) {
+            const name = usage.path["script:".len..];
+            if (name.len == 0 or name.len > max_name_bytes) {
+                parser.note(usage.line, "script name");
+                return error.InvalidUse;
+            }
+            const library = parser.library orelse {
+                parser.note(usage.line, "no script library was provided");
+                return error.UnknownScript;
+            };
+            if (library.find(name) == null) {
+                parser.note(usage.line, "unknown sub-script");
+                return error.UnknownScript;
+            }
+            try declareName(parser.allocator, &script_imports, name);
+        } else {
+            parser.note(usage.line, "use pack.<name> or script:<name>");
+            return error.InvalidUse;
+        }
+    }
+
+    for (script.caps) |cap| {
+        try validateCapOptions(parser, cap);
+        const pack = packForVerb(cap.verb) orelse {
+            parser.note(cap.line, "verb has no pack");
+            return error.UnknownVerb;
+        };
+        if (!nameIn(imported_packs.items, pack)) {
+            parser.note(cap.line, "missing use of the pack that owns this verb");
+            return error.PackNotImported;
+        }
+    }
+
+    var context = ValidateContext{
+        .parser = parser,
+        .script = script,
+        .packs = &imported_packs,
+        .script_imports = &script_imports,
+        .exported = &exported,
+        .runs = &runs,
+    };
+
+    for (script.steps, 0..) |step, index| {
+        for (script.steps[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.name, step.name)) {
+                parser.note(step.line, "step name");
+                return error.InvalidScriptName;
+            }
+        }
+        try validateStep(&context, step);
+    }
+
+    script.exports = parser.allocator.dupe([]const u8, exported.items) catch return error.OutOfMemory;
+    script.script_imports = parser.allocator.dupe([]const u8, script_imports.items) catch return error.OutOfMemory;
+    script.runs = parser.allocator.dupe([]const u8, runs.items) catch return error.OutOfMemory;
+}
+
+fn validateStep(context: *ValidateContext, step: Step) Error!void {
+    const parser = context.parser;
     var visible: std.ArrayList([]const u8) = .empty;
     defer visible.deinit(parser.allocator);
-    visible.appendSlice(parser.allocator, exported.items) catch return error.TooManyItems;
+    visible.appendSlice(parser.allocator, context.exported.items) catch return error.TooManyItems;
 
     var local: std.ArrayList([]const u8) = .empty;
     defer local.deinit(parser.allocator);
 
-    try validateStmts(parser, script, step.body, &visible, &local, exported, true);
+    try validateStmts(context, step.body, &visible, &local, true);
 }
 
 fn validateStmts(
-    parser: *Parser,
-    script: *const Script,
+    context: *ValidateContext,
     statements: []Stmt,
     visible: *std.ArrayList([]const u8),
     local: *std.ArrayList([]const u8),
-    exported: *std.ArrayList([]const u8),
     is_step_top: bool,
 ) Error!void {
+    const parser = context.parser;
+    const script = context.script;
+
     for (statements) |statement| {
         switch (statement) {
             .call => |call| try validateCall(parser, script, call),
@@ -1111,20 +1236,37 @@ fn validateStmts(
                     parser.note(out.line, "out variable must be assigned first");
                     return error.UnknownVariable;
                 }
-                if (is_step_top) try declareName(parser.allocator, exported, out.name);
+                if (is_step_top) try declareName(parser.allocator, context.exported, out.name);
+            },
+            .run => |run| {
+                if (!nameIn(context.script_imports.items, run.name)) {
+                    parser.note(run.line, "run target was not imported");
+                    return error.UnknownScript;
+                }
+                const library = parser.library orelse {
+                    parser.note(run.line, "no script library was provided");
+                    return error.UnknownScript;
+                };
+                const target = library.find(run.name) orelse {
+                    parser.note(run.line, "unknown sub-script");
+                    return error.UnknownScript;
+                };
+                try declareName(parser.allocator, context.runs, run.name);
+                // The sub-script's exports become readable in the caller at this point.
+                for (target.exports) |name| try declareName(parser.allocator, visible, name);
             },
             .if_stmt => |branch| {
                 try validateCond(parser, branch.cond, visible.items);
                 const mark = visible.items.len;
-                try validateStmts(parser, script, branch.then_body, visible, local, exported, false);
+                try validateStmts(context, branch.then_body, visible, local, false);
                 visible.shrinkRetainingCapacity(mark);
-                try validateStmts(parser, script, branch.else_body, visible, local, exported, false);
+                try validateStmts(context, branch.else_body, visible, local, false);
                 visible.shrinkRetainingCapacity(mark);
             },
             .for_stmt => |loop| {
                 const mark = visible.items.len;
                 try declareName(parser.allocator, visible, loop.var_name);
-                try validateStmts(parser, script, loop.body, visible, local, exported, false);
+                try validateStmts(context, loop.body, visible, local, false);
                 visible.shrinkRetainingCapacity(mark);
             },
         }
@@ -1250,6 +1392,7 @@ test "parses a canonical script" {
 test "rejects unknown verbs" {
     try std.testing.expectError(error.UnknownVerb, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    cap bad = subghz.explode
         \\    step "s" do
         \\        stop
@@ -1261,6 +1404,7 @@ test "rejects unknown verbs" {
 test "rejects missing end" {
     try std.testing.expectError(error.MissingEnd, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    step "s" do
         \\        stop
         \\    end
@@ -1270,6 +1414,7 @@ test "rejects missing end" {
 test "rejects undeclared capabilities" {
     try std.testing.expectError(error.UndeclaredCap, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    step "s" do
         \\        ghost { payload = "raw" }
         \\    end
@@ -1280,6 +1425,7 @@ test "rejects undeclared capabilities" {
 test "rejects duplicate variables inside a step" {
     try std.testing.expectError(error.DuplicateVariable, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    cap rf_capture = subghz.read
         \\    step "s" do
         \\        sig = rf_capture { into = "artifact" }
@@ -1292,6 +1438,7 @@ test "rejects duplicate variables inside a step" {
 test "rejects non-pack uses and invalid durations" {
     try std.testing.expectError(error.InvalidUse, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    use "file:other"
         \\    step "s" do
         \\        stop
@@ -1300,6 +1447,7 @@ test "rejects non-pack uses and invalid durations" {
     ));
     try std.testing.expectError(error.InvalidDuration, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    budget { time = "10 minutes" }
         \\    step "s" do
         \\        stop
@@ -1311,6 +1459,7 @@ test "rejects non-pack uses and invalid durations" {
 test "rejects invalid severities and unknown option keys" {
     try std.testing.expectError(error.InvalidSeverity, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    step "s" do
         \\        emit finding { severity = "apocalyptic", message = "m" }
         \\    end
@@ -1318,6 +1467,7 @@ test "rejects invalid severities and unknown option keys" {
     ));
     try std.testing.expectError(error.UnknownOptionKey, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    cap rf_tx = subghz.transmit { nonsense = "x" }
         \\    step "s" do
         \\        stop
@@ -1333,6 +1483,7 @@ test "rejects unterminated strings and trailing input" {
     ));
     try std.testing.expectError(error.TrailingInput, parse(std.testing.allocator,
         \\script "x" do
+        \\    use "pack.rf"
         \\    step "s" do
         \\        stop
         \\    end
@@ -1355,4 +1506,104 @@ test "indentation is not significant" {
     defer script.deinit();
     try std.testing.expectEqualStrings("flat", script.name);
     try std.testing.expectEqual(@as(usize, 1), script.steps.len);
+}
+
+test "rejects a cap whose pack was not imported" {
+    try std.testing.expectError(error.PackNotImported, parse(std.testing.allocator,
+        \\script "no-pack" do
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        rf { payload = "p" }
+        \\    end
+        \\end
+    ));
+}
+
+test "rejects unknown packs" {
+    try std.testing.expectError(error.UnknownPack, parse(std.testing.allocator,
+        \\script "ghost-pack" do
+        \\    use "pack.ghost"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        rf { payload = "p" }
+        \\    end
+        \\end
+    ));
+}
+
+test "rejects a verb from a pack that was not imported" {
+    try std.testing.expectError(error.PackNotImported, parse(std.testing.allocator,
+        \\script "wrong-pack" do
+        \\    use "pack.rf"
+        \\    cap net = net.scan
+        \\    step "s" do
+        \\        net { payload = "p" }
+        \\    end
+        \\end
+    ));
+}
+
+test "packForVerb covers every declared verb" {
+    for (verbs) |entry| {
+        try std.testing.expect(packForVerb(entry.name) != null);
+    }
+}
+
+test "run requires an imported sub-script" {
+    try std.testing.expectError(error.UnknownScript, parse(std.testing.allocator,
+        \\script "orphan" do
+        \\    use "pack.rf"
+        \\    step "s" do
+        \\        run "helper"
+        \\    end
+        \\end
+    ));
+}
+
+test "a run target must exist in the library" {
+    try std.testing.expectError(error.UnknownScript, parseWithLibrary(std.testing.allocator,
+        \\script "missing" do
+        \\    use "script:helper"
+        \\    step "s" do
+        \\        run "helper"
+        \\    end
+        \\end
+    , &.{}));
+}
+
+test "a sub-script export becomes visible after run" {
+    var helper = try parse(std.testing.allocator,
+        \\script "helper" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "capture" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        out sig
+        \\    end
+        \\end
+    );
+    defer helper.deinit();
+
+    const library = Library{ .entries = &.{.{ .name = "helper", .script = &helper }} };
+    var caller = try parseWithLibrary(std.testing.allocator,
+        \\script "caller" do
+        \\    use "pack.rf"
+        \\    use "script:helper"
+        \\    cap rf = subghz.read
+        \\    step "decide" do
+        \\        run "helper"
+        \\        if sig.protocol == "Princeton" then
+        \\            rf { payload = "match" }
+        \\        end
+        \\    end
+        \\end
+    , &library);
+    defer caller.deinit();
+
+    // The helper is the one exporting; the caller only records what it ran.
+    try std.testing.expectEqual(@as(usize, 1), helper.exports.len);
+    try std.testing.expectEqualStrings("sig", helper.exports[0]);
+    try std.testing.expectEqual(@as(usize, 0), caller.exports.len);
+    try std.testing.expectEqual(@as(usize, 1), caller.runs.len);
+    try std.testing.expectEqualStrings("helper", caller.runs[0]);
 }
