@@ -158,7 +158,7 @@ pub const AssetGraph = struct {
         var asset = &self.assets.items[asset_index];
         asset.confidence = strongerConfidence(asset.confidence, observation.confidence);
         try addUniqueSource(self.allocator, &asset.sources, observation.source_id, max_sources_per_asset);
-        if (observation.kind == .endpoint or observation.kind == .service) {
+        if (observation.kind == .endpoint or observation.kind == .service or observation.kind == .package) {
             const version_confidence: ?network.Confidence = if (observation.version.len == 0)
                 null
             else

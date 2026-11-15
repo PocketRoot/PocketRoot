@@ -5,6 +5,8 @@ pub const Kind = enum {
     name_query,
     endpoint,
     service,
+    /// A component read from a software inventory rather than from the network.
+    package,
 };
 
 pub const Confidence = enum {
