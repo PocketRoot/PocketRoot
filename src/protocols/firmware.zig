@@ -246,10 +246,11 @@ pub fn analyzeWith(
                     const clipped = @min(ref.length, max_string_bytes);
                     const text = data[ref.offset .. ref.offset + clipped];
                     const owner = containingFunction(listing.entries, literal.instruction);
+                    const technique = if (literal.kind == .pair) " [movw/movt]" else "";
                     const line = std.fmt.bufPrint(
                         &xref_buffers[xref_count],
-                        "\"{s}\" <- 0x{x:0>8} in 0x{x:0>8}",
-                        .{ text, literal.instruction, owner },
+                        "\"{s}\" <- 0x{x:0>8} in 0x{x:0>8}{s}",
+                        .{ text, literal.instruction, owner, technique },
                     ) catch "";
                     xref_lengths[xref_count] = line.len;
                     xref_count += 1;
@@ -466,6 +467,25 @@ test "block entropy bounds" {
     }
     const value = blockEntropyX100(&uniform);
     try std.testing.expect(value >= 795 and value <= 805);
+}
+
+test "links movw/movt address pairs to strings" {
+    var image = [_]u8{0} ** 64;
+    std.mem.writeInt(u32, image[0..4], 0x2000_1000, .little);
+    std.mem.writeInt(u32, image[4..8], 0x0800_0009, .little);
+    // 0x08000008: movw r0, #0x0020 ; movt r0, #0x0800  => 0x08000020
+    const code = [_]u8{ 0x40, 0xF2, 0x20, 0x00, 0xC0, 0xF6, 0x00, 0x00 };
+    @memcpy(image[8 .. 8 + code.len], &code);
+    const text = "PairRef";
+    @memcpy(image[0x20 .. 0x20 + text.len], text);
+
+    var result = try analyzeWith(std.testing.allocator, &image, .{ .base_address = 0x0800_0000 });
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("1", findField(&result, "strings_referenced").?);
+    const xref = findField(&result, "xref_1").?;
+    try std.testing.expect(std.mem.indexOf(u8, xref, "PairRef") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xref, "[movw/movt]") != null);
 }
 
 test "links literal-pool loads to strings" {

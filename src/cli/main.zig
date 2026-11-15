@@ -416,6 +416,20 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "script")) {
+        if (args.len < 4 or !std.mem.eql(u8, args[2], "run")) {
+            try stdout.print("usage: script run [--lib a.pk,b.pk] [--authorize-active] [--region <id>] <file.pk>\n\n", .{});
+            return error.InvalidArguments;
+        }
+        const request = parseScriptRunArgs(arena, args[3..]) catch {
+            try stdout.print("usage: script run [--lib a.pk,b.pk] [--authorize-active] [--region <id>] <file.pk>\n", .{});
+            return error.InvalidArguments;
+        };
+        const ok = try runScriptCommand(arena, init.io, Io.Dir.cwd(), stdout, request);
+        if (!ok) return error.CommandFailed;
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "analyze") or std.mem.eql(u8, args[1], "report")) {
         const command = args[1];
         if (args.len < 3) {
@@ -561,6 +575,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                       Match offline observations to the local catalogue
         \\  migrate [--protocol <id>] <input> <output>
         \\                       Validate and preserve a Flipper file byte-exact
+        \\  script run [--lib a.pk,b.pk] [--authorize-active] [--region <id>] <file.pk>
+        \\                       Compile and run a DSL script on the simulated backend
         \\  analyze [--json] <path>  Analyze a protocol file by extension
         \\  analyze [--json] [--base <hex>] [--arch <thumb|arm>] --protocol firmware <path>
         \\                       Firmware triage with Thumb disassembly
@@ -614,6 +630,137 @@ fn printArchive(writer: *Io.Writer, entries: []const PocketRoot.services.archive
             try writer.writeByte('\n');
         }
     }
+}
+
+const ScriptRunRequest = struct {
+    path: []const u8,
+    libs: []const []const u8 = &.{},
+    authorize_active: bool = false,
+    region: []const u8 = "",
+};
+
+fn parseScriptRunArgs(allocator: std.mem.Allocator, raw: []const [:0]const u8) !ScriptRunRequest {
+    var request = ScriptRunRequest{ .path = "" };
+    var libs: std.ArrayList([]const u8) = .empty;
+    var path: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--lib")) {
+            if (index + 1 >= raw.len) return error.InvalidScriptArgs;
+            var pieces = std.mem.splitScalar(u8, raw[index + 1], ',');
+            var appended: usize = 0;
+            while (pieces.next()) |piece| {
+                const trimmed = std.mem.trim(u8, piece, " ");
+                if (trimmed.len == 0) return error.InvalidScriptArgs;
+                libs.append(allocator, trimmed) catch return error.OutOfMemory;
+                appended += 1;
+            }
+            if (appended == 0) return error.InvalidScriptArgs;
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--authorize-active")) {
+            if (request.authorize_active) return error.InvalidScriptArgs;
+            request.authorize_active = true;
+            index += 1;
+        } else if (std.mem.eql(u8, raw[index], "--region")) {
+            if (request.region.len != 0 or index + 1 >= raw.len) return error.InvalidScriptArgs;
+            request.region = raw[index + 1];
+            index += 2;
+        } else {
+            if (std.mem.startsWith(u8, raw[index], "--") or path != null) return error.InvalidScriptArgs;
+            path = raw[index];
+            index += 1;
+        }
+    }
+    request.path = path orelse return error.InvalidScriptArgs;
+    request.libs = libs.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    return request;
+}
+
+fn enableAllKinds(backend: *PocketRoot.simulator.device.Backend) void {
+    inline for (std.meta.fields(PocketRoot.core.capability.Kind)) |field| {
+        backend.enable(@enumFromInt(field.value));
+    }
+}
+
+/// Runs a DSL script against the simulated backend. Library scripts are parsed in the
+/// order given, so a later library script may itself run an earlier one.
+fn runScriptCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    dir: Io.Dir,
+    writer: *Io.Writer,
+    request: ScriptRunRequest,
+) !bool {
+    const max_bytes = PocketRoot.services.script.max_script_bytes;
+    var entries: std.ArrayList(PocketRoot.services.script.LibraryEntry) = .empty;
+
+    for (request.libs) |lib_path| {
+        const data = dir.readFileAlloc(io, lib_path, allocator, .limited(max_bytes)) catch |err| {
+            try writer.print("cannot read library script {s}: {s}\n", .{ lib_path, @errorName(err) });
+            return false;
+        };
+        const library = PocketRoot.services.script.Library{ .entries = entries.items };
+        const parsed = allocator.create(PocketRoot.services.script.Script) catch return error.OutOfMemory;
+        parsed.* = PocketRoot.services.script.parseWithLibrary(allocator, data, &library) catch |err| {
+            try writer.print("invalid library script {s}: {s}\n", .{ lib_path, @errorName(err) });
+            return false;
+        };
+        try entries.append(allocator, .{ .name = parsed.name, .script = parsed });
+    }
+
+    const library = PocketRoot.services.script.Library{ .entries = entries.items };
+    const main_data = dir.readFileAlloc(io, request.path, allocator, .limited(max_bytes)) catch |err| {
+        try writer.print("cannot read script {s}: {s}\n", .{ request.path, @errorName(err) });
+        return false;
+    };
+    var source = PocketRoot.services.script.parseWithLibrary(
+        allocator,
+        main_data,
+        if (entries.items.len > 0) &library else null,
+    ) catch |err| {
+        try writer.print("invalid script {s}: {s}\n", .{ request.path, @errorName(err) });
+        return false;
+    };
+    defer source.deinit();
+
+    var harness: PocketRoot.simulator.device.Harness = undefined;
+    harness.init(allocator, .{ .region = request.region, .allow_active = request.authorize_active });
+    defer harness.deinit();
+    enableAllKinds(&harness.backend);
+
+    var executor: PocketRoot.ScriptExecutor = undefined;
+    executor.initWithLibrary(allocator, &source, &harness.capabilities, .{
+        .authorize_active = request.authorize_active,
+        .policy_region = request.region,
+    }, if (entries.items.len > 0) &library else null) catch |err| {
+        try writer.print("cannot compile script {s}: {s}\n", .{ request.path, @errorName(err) });
+        return false;
+    };
+    defer executor.deinit();
+
+    const status = executor.run() catch |err| {
+        try writer.print("script {s} aborted: {s}\n", .{ source.name, @errorName(err) });
+        return false;
+    };
+
+    try writer.print("script \"{s}\" {s}\n", .{ source.name, @tagName(status) });
+    const audit = harness.capabilities.audit.entries.items;
+    try writer.print("audit: {d}\n", .{audit.len});
+    for (audit, 0..) |entry, position| {
+        try writer.print("  {d} {s} {s} {s} {s}\n", .{
+            position + 1,
+            entry.subject,
+            @tagName(entry.kind),
+            @tagName(entry.operation),
+            @tagName(entry.status),
+        });
+    }
+    const emitted = executor.emitted();
+    if (emitted.len > 0) {
+        try writer.print("emitted: {d}\n", .{emitted.len});
+        for (emitted) |item| try writer.print("  {s} {s}\n", .{ item.severity, item.message });
+    }
+    return status == PocketRoot.services.workflow.Status.succeeded;
 }
 
 fn printProtocols(writer: *Io.Writer, protocols: []const PocketRoot.ProtocolDescriptor) !void {
@@ -1632,4 +1779,115 @@ test "port lists support ranges and remove duplicates" {
     try std.testing.expectError(error.InvalidPortList, parsePortList(std.testing.allocator, "0,80", 5));
     try std.testing.expectError(error.InvalidPortList, parsePortList(std.testing.allocator, "90-80", 5));
     try std.testing.expectError(error.TooManyPorts, parsePortList(std.testing.allocator, "22,80", 1));
+}
+
+test "script run arguments accept libraries and authorization flags" {
+    const raw = [_][:0]const u8{
+        "--lib",
+        "a.pk,b.pk",
+        "--authorize-active",
+        "--region",
+        "EU",
+        "main.pk",
+    };
+    const request = try parseScriptRunArgs(std.testing.allocator, &raw);
+    defer std.testing.allocator.free(request.libs);
+
+    try std.testing.expectEqualStrings("main.pk", request.path);
+    try std.testing.expectEqual(@as(usize, 2), request.libs.len);
+    try std.testing.expectEqualStrings("a.pk", request.libs[0]);
+    try std.testing.expectEqualStrings("b.pk", request.libs[1]);
+    try std.testing.expect(request.authorize_active);
+    try std.testing.expectEqualStrings("EU", request.region);
+}
+
+test "script run arguments reject malformed options" {
+    const missing_path = [_][:0]const u8{"--lib"};
+    try std.testing.expectError(error.InvalidScriptArgs, parseScriptRunArgs(std.testing.allocator, &missing_path));
+
+    const two_paths = [_][:0]const u8{ "a.pk", "b.pk" };
+    try std.testing.expectError(error.InvalidScriptArgs, parseScriptRunArgs(std.testing.allocator, &two_paths));
+
+    const empty_lib = [_][:0]const u8{ "--lib", " , ", "main.pk" };
+    try std.testing.expectError(error.InvalidScriptArgs, parseScriptRunArgs(std.testing.allocator, &empty_lib));
+
+    const unknown_flag = [_][:0]const u8{ "--nope", "main.pk" };
+    try std.testing.expectError(error.InvalidScriptArgs, parseScriptRunArgs(std.testing.allocator, &unknown_flag));
+}
+
+test "script run inlines a library sub-script end to end" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const helper_source =
+        \\script "helper" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "capture" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        out sig
+        \\    end
+        \\end
+    ;
+    const caller_source =
+        \\script "caller" do
+        \\    use "pack.rf"
+        \\    use "script:helper"
+        \\    cap rf = subghz.read
+        \\    step "decide" do
+        \\        run "helper"
+        \\        if sig.protocol == "Princeton" then
+        \\            rf { payload = "after" }
+        \\        else
+        \\            emit warning "miss"
+        \\        end
+        \\    end
+        \\end
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "helper.pk", .data = helper_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "caller.pk", .data = caller_source });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const raw = [_][:0]const u8{ "--lib", "helper.pk", "caller.pk" };
+    const request = try parseScriptRunArgs(allocator, &raw);
+
+    var buffer: [4096]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    const ok = try runScriptCommand(allocator, std.testing.io, tmp.dir, &writer, request);
+    try std.testing.expect(ok);
+
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "script \"caller\" succeeded") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "script:helper") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "script:caller") != null);
+}
+
+test "script run without a library rejects sub-script imports" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const caller_source =
+        \\script "caller" do
+        \\    use "script:helper"
+        \\    step "s" do
+        \\        run "helper"
+        \\    end
+        \\end
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "caller.pk", .data = caller_source });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const raw = [_][:0]const u8{"caller.pk"};
+    const request = try parseScriptRunArgs(allocator, &raw);
+
+    var buffer: [1024]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    const ok = try runScriptCommand(allocator, std.testing.io, tmp.dir, &writer, request);
+    try std.testing.expect(!ok);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "UnknownScript") != null);
 }

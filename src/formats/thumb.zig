@@ -24,9 +24,12 @@ pub const Sample = struct {
     }
 };
 
+pub const RefKind = enum { direct, pair };
+
 pub const LiteralRef = struct {
     address: u32,
     instruction: u32,
+    kind: RefKind = .direct,
 };
 
 pub const Listing = struct {
@@ -57,6 +60,13 @@ const Decoded = struct {
     call_target: ?u32 = null,
     /// Set for pc-relative data loads (LDR literal, ADR); used for string xrefs.
     literal: ?u32 = null,
+    mov: ?MovImm = null,
+};
+
+pub const MovImm = struct {
+    reg: u4,
+    value: u16,
+    high: bool,
 };
 
 fn regName(index: u3) []const u8 {
@@ -120,15 +130,18 @@ fn decode32(data: []const u8, offset: usize, address: u32) Decoded {
             fmt(&decoded, "#0x{x:0>8}", .{target});
             return decoded;
         }
-        const op = (first >> 4) & 0b11111;
-        if (op == 0b00100 or op == 0b01010) {
-            decoded.mnemonic = if (op == 0b00100) "movw" else "movt";
+        // MOVW is 10 0100, MOVT is 10 1100 in bits 8..4. Testing bits 15..4 here used to
+        // reject MOVT outright, which silently disabled every movw/movt address pair.
+        const op = (first >> 4) & 0b1111;
+        if (op == 0b0100 or op == 0b1100) {
+            decoded.mnemonic = if (op == 0b0100) "movw" else "movt";
             const rd = (second >> 8) & 0x0f;
             const imm4 = first & 0x0f;
             const i = (first >> 10) & 1;
             const imm3 = (second >> 12) & 0b111;
             const imm8 = second & 0xff;
             const value: u32 = (@as(u32, imm4) << 12) | (@as(u32, i) << 11) | (@as(u32, imm3) << 8) | imm8;
+            decoded.mov = .{ .reg = @intCast(rd), .value = @intCast(value), .high = op == 0b1100 };
             fmt(&decoded, "r{d}, #0x{x}", .{ rd, value });
             return decoded;
         }
@@ -412,6 +425,15 @@ pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_o
     var literals: std.ArrayList(LiteralRef) = .empty;
     defer literals.deinit(allocator);
 
+    // MOVW/MOVT pairs are matched within a short window: a compiler emits them back to
+    // back for a 32-bit address, and a wider window would pair unrelated immediates.
+    const max_pair_distance = 4;
+    const PendingLow = struct { value: u16, instruction: u32 };
+    var pending_low: [16]?PendingLow = undefined;
+    var pending_age: [16]u8 = undefined;
+    for (&pending_low) |*slot| slot.* = null;
+    for (&pending_age) |*age| age.* = 0;
+
     const max_targets = 4096;
     var offset: usize = @min(start_offset, data.len);
     var address = base_address + @as(u32, @intCast(offset));
@@ -425,6 +447,28 @@ pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_o
             if (literals.items.len < max_targets) {
                 literals.append(allocator, .{ .address = target, .instruction = address }) catch {};
             }
+        }
+        if (decoded.mov) |mov| {
+            if (!mov.high) {
+                pending_low[mov.reg] = .{ .value = mov.value, .instruction = address };
+                pending_age[mov.reg] = 0;
+            } else {
+                if (pending_low[mov.reg]) |low| {
+                    if (pending_age[mov.reg] <= max_pair_distance) {
+                        const target = (@as(u32, mov.value) << 16) | @as(u32, low.value);
+                        if (literals.items.len < max_targets) {
+                            literals.append(allocator, .{
+                                .address = target,
+                                .instruction = low.instruction,
+                                .kind = .pair,
+                            }) catch {};
+                        }
+                    }
+                }
+                pending_low[mov.reg] = null;
+            }
+        } else {
+            for (&pending_age) |*age| age.* +|= 1;
         }
         if (decoded.call_target) |target| {
             if (targets.items.len < max_targets and inImage(target, base_address, data.len)) {
@@ -542,4 +586,29 @@ test "unknown encodings are counted" {
     var listing = try decode(std.testing.allocator, &code, 0, 0);
     defer listing.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), listing.instructions);
+}
+
+test "pairs movw/movt into a 32-bit literal reference" {
+    var image = [_]u8{0} ** 32;
+    // movw r0, #0x0020 ; movt r0, #0x0800  =>  0x08000020
+    const code = [_]u8{ 0x40, 0xF2, 0x20, 0x00, 0xC0, 0xF6, 0x00, 0x00 };
+    @memcpy(image[0..code.len], &code);
+
+    var listing = try decode(std.testing.allocator, &image, 0x0800_0000, 0);
+    defer listing.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), listing.literals.len);
+    try std.testing.expectEqual(@as(u32, 0x0800_0020), listing.literals[0].address);
+    try std.testing.expectEqual(RefKind.pair, listing.literals[0].kind);
+    try std.testing.expectEqual(@as(u32, 0x0800_0000), listing.literals[0].instruction);
+}
+
+test "a movt without a matching movw produces no reference" {
+    var image = [_]u8{0} ** 16;
+    const code = [_]u8{ 0xC0, 0xF6, 0x00, 0x00 };
+    @memcpy(image[0..code.len], &code);
+
+    var listing = try decode(std.testing.allocator, &image, 0x0800_0000, 0);
+    defer listing.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), listing.literals.len);
 }
