@@ -18,13 +18,13 @@ script "replay-subghz" do
     cap rf_tx      = subghz.transmit { region = from_policy }
 
     step "capture" do
-        sig = rf_capture { into = "artifact" }
+        sig = rf_capture { payload = "protocol=Princeton" }
         if sig.protocol == "Princeton" then
-            rf_tx { payload = sig.raw, on_error = "continue" }
+            rf_tx { payload = sig.protocol, on_error = "continue" }
             emit finding {
                 severity = "info",
                 message  = "replayed princeton frame",
-                tag      = sig.name
+                tag      = sig.protocol
             }
         else
             emit info "unsupported protocol"
@@ -41,7 +41,8 @@ end
 | Blocks | `do ... end`; `if ... then ... elseif ... else ... end`; `for i = 1, N do ... end` |
 | Comments | `--` to end of line; no block comments |
 | Statement separator | Newline; an optional `;` is accepted |
-| Strings | Double quotes with escapes; no long-bracket strings |
+| Strings | Double quotes; no escape sequences (the next `"` ends the string); no long-bracket strings |
+| Option values | String, number, `true`/`false`, `from_policy`, or a variable reference (`sig`, `sig.field`) |
 | Identifiers | `[A-Za-z_][A-Za-z0-9_]*` |
 | Loops | Bounded numeric `for` only; `N` must be a literal in `1..64`; no `while` |
 | Functions | No user-defined functions |
@@ -106,9 +107,10 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 | `on_error` | `"abort"`, `"continue"` or `"retry(n)"`; retry reuses the workflow attempt counter |
 | Scoping | `sig = ...` is local to the step; crossing steps requires `out <name>` |
 | Variables | A successful call binds its result payload as `name` and, for each `key=value` line, as `name.key` |
+| References | `payload`, `severity`, `message`, `tag` and `note` accept a variable reference. The root must be visible at parse time; a path that is visible but has no runtime field fails the step with `UnresolvedReference` instead of sending or emitting an empty value |
 | Conditions | A comparison references a variable assigned earlier in the same step, or one exported with `out`. Comparing two variables and mixing `and` with `or` are rejected with `UnsupportedCondition` |
 | `stop` | Ends the enclosing statement list; later statements are not compiled |
-| `emit` | Records a finding without contacting the capability service |
+| `emit` | Records a finding without contacting the capability service; fields may be literals or references |
 
 ## 7. Sub-scripts
 
@@ -185,7 +187,7 @@ demonstrates compilation, execution, audit and gating; it does not drive hardwar
 | `budget.time` | 10 minutes |
 | Sub-script nesting | 8 |
 
-## 9. Verifying a catalogue entry
+## 10. Verifying a catalogue entry
 
 `net.scan` returns the recorded observation for a lab target when the payload names it,
 so a script can decide from data instead of from constants:
@@ -209,12 +211,12 @@ script "verify-cve-2021-41773" do
 end
 ```
 
-The four scripts in `samples/scripts/` cover the entries that the catalogue repository
+The four CVE scripts in `samples/scripts/` cover the entries that the catalogue repository
 reproduced in Docker (CVE-2021-41773, CVE-2021-42013, CVE-2024-31449 and the inconclusive
 CVE-2026-44631). Observations come from `src/simulator/fixtures.zig`; they are recorded
 values, not live traffic, and the targets are synthetic names.
 
-`emit` fields take literals only, so a variable cannot be embedded in a finding message.
+`emit` fields accept literals or variable references (see section 6), so a finding can carry a value observed in the same step. A reference whose field does not exist fails the step rather than emitting an empty field.
 
 The catalogue repository runs these scripts, then the matcher, and compares both results
 with the reproduction evidence:

@@ -18,6 +18,7 @@ pub const max_ticks = 4096;
 pub const Error = error{
     OutOfMemory,
     UnsupportedVerb,
+    InvalidOptionValue,
     MissingCapability,
     TickBudgetExceeded,
     UnsupportedCondition,
@@ -137,6 +138,14 @@ const Compiler = struct {
         // Ids are per call site, not per cap name: two scripts (or two branches) may
         // declare the same name with different payloads.
         const id = try self.nextId("call");
+        const payload_literal = stringOption(call.options, "payload");
+        const payload_ref = referenceOption(call.options, "payload");
+        // A bare identifier is a reference; the parser validated its root, and an
+        // unresolved path fails the step at run time rather than sending an empty
+        // payload. Numbers and booleans are not valid payload sources.
+        if (payload_literal == null and payload_ref == null and hasOption(call.options, "payload")) {
+            return error.InvalidOptionValue;
+        }
         try self.addAction(
             id,
             .{
@@ -144,8 +153,9 @@ const Compiler = struct {
                 .subject = subject,
                 .kind = mapping.kind,
                 .operation = mapping.operation,
-                .region = regionOption(cap, options.policy_region),
-                .payload = stringOption(call.options, "payload") orelse "",
+                .region = try regionOption(cap, options.policy_region),
+                .payload = payload_literal orelse "",
+                .payload_ref = payload_ref,
                 .active_authorized = options.authorize_active,
                 .bind = bind,
             },
@@ -375,18 +385,34 @@ fn emitSpec(emit: script.Emit) ?EmitSpec {
             var severity: []const u8 = "info";
             var message: []const u8 = "";
             var tag: []const u8 = "";
+            var severity_ref: ?[]const u8 = null;
+            var message_ref: ?[]const u8 = null;
+            var tag_ref: ?[]const u8 = null;
             for (options) |option| {
-                const text = switch (option.value) {
-                    .string => |value| value,
-                    else => continue,
-                };
-                if (std.mem.eql(u8, option.key, "severity")) severity = text;
-                if (std.mem.eql(u8, option.key, "message")) message = text;
-                if (std.mem.eql(u8, option.key, "tag")) tag = text;
+                switch (option.value) {
+                    .string => |value| {
+                        if (std.mem.eql(u8, option.key, "severity")) severity = value;
+                        if (std.mem.eql(u8, option.key, "message")) message = value;
+                        if (std.mem.eql(u8, option.key, "tag") or std.mem.eql(u8, option.key, "note")) tag = value;
+                    },
+                    .reference => |reference| {
+                        if (std.mem.eql(u8, option.key, "severity")) severity_ref = reference;
+                        if (std.mem.eql(u8, option.key, "message")) message_ref = reference;
+                        if (std.mem.eql(u8, option.key, "tag") or std.mem.eql(u8, option.key, "note")) tag_ref = reference;
+                    },
+                    else => {},
+                }
             }
-            if (message.len == 0) return null;
+            if (message.len == 0 and message_ref == null) return null;
             return .{
-                .emit = .{ .severity = severity, .message = message },
+                .emit = .{
+                    .severity = severity,
+                    .message = message,
+                    .payload = tag,
+                    .severity_ref = severity_ref,
+                    .message_ref = message_ref,
+                    .payload_ref = tag_ref,
+                },
                 .payload = tag,
             };
         },
@@ -415,15 +441,17 @@ fn attemptLimit(cap: script.Cap) u16 {
     return parsed;
 }
 
-fn regionOption(cap: script.Cap, policy_region: []const u8) []const u8 {
+fn regionOption(cap: script.Cap, policy_region: []const u8) Error![]const u8 {
     for (cap.options) |option| {
         if (!std.mem.eql(u8, option.key, "region")) continue;
         return switch (option.value) {
             .string => |value| value,
             .policy => policy_region,
-            else => "",
+            else => error.InvalidOptionValue,
         };
     }
+    // No region option: active subghz requests are denied by the kernel unless the
+    // policy and request both carry a region, so an empty value stays safe.
     return "";
 }
 
@@ -436,6 +464,22 @@ fn stringOption(options: []const script.Option, key: []const u8) ?[]const u8 {
         };
     }
     return null;
+}
+
+fn referenceOption(options: []const script.Option, key: []const u8) ?[]const u8 {
+    for (options) |option| {
+        if (!std.mem.eql(u8, option.key, key)) continue;
+        return switch (option.value) {
+            .reference => |value| value,
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn hasOption(options: []const script.Option, key: []const u8) bool {
+    for (options) |option| if (std.mem.eql(u8, option.key, key)) return true;
+    return false;
 }
 
 const simulated_device = @import("../simulator/device.zig");
@@ -838,4 +882,143 @@ test "each if site gets its own condition spec" {
             try std.testing.expect(!std.mem.eql(u8, left.id, right.id));
         }
     }
+}
+
+test "compiles a payload reference into the action spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "ref-compile" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        rf { payload = sig.protocol }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), compiled.actions.len);
+    try std.testing.expectEqualStrings("", compiled.actions[1].payload);
+    try std.testing.expectEqualStrings("sig.protocol", compiled.actions[1].payload_ref.?);
+}
+
+test "resolves a payload reference from the bound observation" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "ref-runtime" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        echo = rf { payload = sig.protocol }
+        \\        out echo
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+
+    var harness: simulated_device.Harness = undefined;
+    harness.init(std.testing.allocator, .{}, null);
+    defer harness.deinit();
+    harness.backend.enable(.subghz);
+
+    var executor: Executor = undefined;
+    try executor.init(std.testing.allocator, &source, &harness.capabilities, .{});
+    defer executor.deinit();
+
+    try std.testing.expectEqual(workflow.Status.succeeded, try executor.run());
+    // The simulated backend echoes the payload, so the second call returning
+    // "Princeton" proves the reference supplied it rather than an empty string.
+    try std.testing.expectEqualStrings("Princeton", executor.variable("echo").?);
+    try std.testing.expectEqual(@as(usize, 2), harness.capabilities.audit.entries.items.len);
+}
+
+test "resolves references in emit finding fields" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "emit-ref" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        level = rf { payload = "critical" }
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        emit finding {
+        \\            severity = level,
+        \\            message = sig.protocol,
+        \\            note = sig.protocol,
+        \\        }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+
+    var harness: simulated_device.Harness = undefined;
+    harness.init(std.testing.allocator, .{}, null);
+    defer harness.deinit();
+    harness.backend.enable(.subghz);
+
+    var executor: Executor = undefined;
+    try executor.init(std.testing.allocator, &source, &harness.capabilities, .{});
+    defer executor.deinit();
+
+    try std.testing.expectEqual(workflow.Status.succeeded, try executor.run());
+    const emitted = executor.emitted();
+    try std.testing.expectEqual(@as(usize, 1), emitted.len);
+    try std.testing.expectEqualStrings("critical", emitted[0].severity);
+    try std.testing.expectEqualStrings("Princeton", emitted[0].message);
+    try std.testing.expectEqualStrings("Princeton", emitted[0].payload);
+}
+
+test "an unresolved reference in emit fails the step" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "emit-missing" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        emit finding { severity = "info", message = "x", tag = sig.name }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+
+    var harness: simulated_device.Harness = undefined;
+    harness.init(std.testing.allocator, .{}, null);
+    defer harness.deinit();
+    harness.backend.enable(.subghz);
+
+    var executor: Executor = undefined;
+    try executor.init(std.testing.allocator, &source, &harness.capabilities, .{});
+    defer executor.deinit();
+
+    try std.testing.expectEqual(workflow.Status.failed, try executor.run());
+    try std.testing.expectEqual(@as(usize, 0), executor.emitted().len);
+}
+
+test "an unresolved reference field fails the step instead of sending an empty payload" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "ref-missing" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        rf { payload = sig.missing }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+
+    var harness: simulated_device.Harness = undefined;
+    harness.init(std.testing.allocator, .{}, null);
+    defer harness.deinit();
+    harness.backend.enable(.subghz);
+
+    var executor: Executor = undefined;
+    try executor.init(std.testing.allocator, &source, &harness.capabilities, .{});
+    defer executor.deinit();
+
+    try std.testing.expectEqual(workflow.Status.failed, try executor.run());
+    // Only the first (successful) call reached the service.
+    try std.testing.expectEqual(@as(usize, 1), harness.capabilities.audit.entries.items.len);
 }

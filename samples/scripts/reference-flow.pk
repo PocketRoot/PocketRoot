@@ -1,0 +1,20 @@
+-- Binds an observation and reuses its fields: the second call's payload and the
+-- emitted tag are variable references, not literals.
+-- Run with: PocketRoot script run samples/scripts/reference-flow.pk
+script "reference-flow" do
+    use "pack.rf"
+
+    cap rf = subghz.read
+
+    step "bind-and-reuse" do
+        observation = rf { payload = "protocol=Princeton" }
+        echo = rf { payload = observation.protocol }
+        out echo
+
+        emit finding {
+            severity = "info",
+            message = "reference flow replay",
+            tag = echo,
+        }
+    end
+end

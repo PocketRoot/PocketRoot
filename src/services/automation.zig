@@ -10,6 +10,11 @@ pub const Emit = struct {
     severity: []const u8 = "info",
     message: []const u8 = "",
     payload: []const u8 = "",
+    /// Variable paths resolved when the emit step runs. A missing path fails the step
+    /// instead of emitting an empty field, so a typo cannot silently change a finding.
+    severity_ref: ?[]const u8 = null,
+    message_ref: ?[]const u8 = null,
+    payload_ref: ?[]const u8 = null,
 };
 
 pub const Emitted = struct {
@@ -35,6 +40,9 @@ pub const ActionSpec = struct {
     operation: capability.Operation,
     region: []const u8 = "",
     payload: []const u8 = "",
+    /// Variable path that supplies the payload at execution time. Mutually exclusive
+    /// with a literal payload; unresolved paths fail the action.
+    payload_ref: ?[]const u8 = null,
     active_authorized: bool = false,
     emit: ?Emit = null,
     /// Binds this action's result payload (key=value lines) to a script variable.
@@ -148,6 +156,13 @@ pub const Engine = struct {
         self.capabilities.emergencyStop();
     }
 
+    /// Resolves a script variable path exactly as bound by bindResult: the whole
+    /// payload under "name" and every key=value field under "name.key". An unknown path
+    /// is an error, never an empty string.
+    fn requireVariable(self: *Engine, path: []const u8) ![]const u8 {
+        return self.variables.get(path) orelse error.UnresolvedReference;
+    }
+
     fn executeAction(context: *anyopaque, action_id: []const u8, _: u16) !workflow.ActionState {
         const self: *Engine = @ptrCast(@alignCast(context));
         const spec = self.findAction(action_id) orelse return error.UnknownAction;
@@ -157,10 +172,13 @@ pub const Engine = struct {
             return .succeeded;
         }
         if (spec.emit) |emit| {
+            const severity = if (emit.severity_ref) |path| try self.requireVariable(path) else emit.severity;
+            const message = if (emit.message_ref) |path| try self.requireVariable(path) else emit.message;
+            const payload = if (emit.payload_ref) |path| try self.requireVariable(path) else emit.payload;
             try self.emitted.append(self.capabilities.allocator, .{
-                .severity = emit.severity,
-                .message = emit.message,
-                .payload = emit.payload,
+                .severity = severity,
+                .message = message,
+                .payload = payload,
             });
             self.last_status = .succeeded;
             return .succeeded;
@@ -169,13 +187,14 @@ pub const Engine = struct {
         const request_id = self.next_request_id;
         self.next_request_id +%= 1;
 
+        const payload = if (spec.payload_ref) |path| try self.requireVariable(path) else spec.payload;
         var result = self.capabilities.execute(.{
             .id = request_id,
             .subject = spec.subject,
             .kind = spec.kind,
             .operation = spec.operation,
             .region = spec.region,
-            .payload = spec.payload,
+            .payload = payload,
             .active_authorized = spec.active_authorized,
         }) catch {
             self.last_status = if (self.capabilities.audit.entries.items.len == 0)

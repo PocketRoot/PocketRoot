@@ -47,6 +47,8 @@ pub const Error = error{
     InvalidNumber,
     InvalidLoopBound,
     UnknownVariable,
+    InvalidReference,
+    InvalidOptionValue,
     UnknownPack,
     PackNotImported,
     UnknownScript,
@@ -479,8 +481,28 @@ const Parser = struct {
                 return .{ .number = token.value };
             },
             .ident => {
+                // A reference is one or more identifiers joined with '.'; it names a
+                // script variable ("sig") or one of its bound fields ("sig.version").
                 _ = self.advance();
-                return .{ .reference = token.text };
+                var text = token.text;
+                while (self.peek().kind == .dot) {
+                    const dot = self.peek();
+                    _ = self.advance();
+                    const part = self.peek();
+                    if (part.kind != .ident) {
+                        self.note(dot.line, "field name after '.'");
+                        return error.InvalidReference;
+                    }
+                    _ = self.advance();
+                    text = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ text, part.text }) catch {
+                        return error.OutOfMemory;
+                    };
+                }
+                if (text.len > max_text_bytes) {
+                    self.note(token.line, "reference");
+                    return error.InvalidReference;
+                }
+                return .{ .reference = text };
             },
             .kw => {
                 if (isKw(token, "true")) {
@@ -1215,7 +1237,7 @@ fn validateStmts(
 
     for (statements) |statement| {
         switch (statement) {
-            .call => |call| try validateCall(parser, script, call),
+            .call => |call| try validateCall(parser, script, call, visible.items),
             .assign => |assign| {
                 if (script.capByName(assign.name) != null) {
                     parser.note(assign.line, "variable name clashes with cap");
@@ -1227,9 +1249,9 @@ fn validateStmts(
                 }
                 try declareName(parser.allocator, local, assign.name);
                 try declareName(parser.allocator, visible, assign.name);
-                try validateCall(parser, script, assign.call);
+                try validateCall(parser, script, assign.call, visible.items);
             },
-            .emit => |emit| try validateEmit(parser, emit),
+            .emit => |emit| try validateEmit(parser, emit, visible.items),
             .stop => {},
             .out => |out| {
                 if (!nameIn(visible.items, out.name)) {
@@ -1291,7 +1313,23 @@ fn validateCond(parser: *Parser, cond: Cond, visible: []const []const u8) Error!
     }
 }
 
-fn validateCall(parser: *Parser, script: *const Script, call: Call) Error!void {
+fn referenceRoot(reference: []const u8) []const u8 {
+    const dot = std.mem.indexOfScalar(u8, reference, '.') orelse return reference;
+    return reference[0..dot];
+}
+
+/// A reference must name a variable that is already visible: either assigned earlier in
+/// the same statement list or exported by a previous step. Unknown roots are rejected at
+/// parse time so a typo cannot silently become an empty payload at run time.
+fn validateReference(parser: *Parser, line: u32, reference: []const u8, visible: []const []const u8) Error!void {
+    const root = referenceRoot(reference);
+    if (root.len == 0 or !nameIn(visible, root)) {
+        parser.note(line, "reference to an unknown variable");
+        return error.UnknownVariable;
+    }
+}
+
+fn validateCall(parser: *Parser, script: *const Script, call: Call, visible: []const []const u8) Error!void {
     if (script.capByName(call.cap) == null) {
         parser.note(call.line, "declared cap");
         return error.UndeclaredCap;
@@ -1301,10 +1339,28 @@ fn validateCall(parser: *Parser, script: *const Script, call: Call) Error!void {
             parser.note(option.line, "option key");
             return error.UnknownOptionKey;
         }
+        if (std.mem.eql(u8, option.key, "payload")) {
+            switch (option.value) {
+                .string => {},
+                .reference => |reference| try validateReference(parser, option.line, reference, visible),
+                else => {
+                    parser.note(option.line, "payload string or variable reference");
+                    return error.InvalidOptionValue;
+                },
+            }
+        } else if (std.mem.eql(u8, option.key, "region")) {
+            switch (option.value) {
+                .string, .policy => {},
+                else => {
+                    parser.note(option.line, "region string or from_policy");
+                    return error.InvalidOptionValue;
+                },
+            }
+        }
     }
 }
 
-fn validateEmit(parser: *Parser, emit: Emit) Error!void {
+fn validateEmit(parser: *Parser, emit: Emit, visible: []const []const u8) Error!void {
     switch (emit) {
         .plain => |plain| {
             if (plain.message.len > max_text_bytes) return error.TooManyItems;
@@ -1318,32 +1374,48 @@ fn validateEmit(parser: *Parser, emit: Emit) Error!void {
                     return error.UnknownOptionKey;
                 }
                 if (std.mem.eql(u8, option.key, "severity")) {
-                    const text = switch (option.value) {
-                        .string => |value| value,
+                    switch (option.value) {
+                        .string => |text| {
+                            if (Severity.parse(text) == null) {
+                                parser.note(option.line, "severity value");
+                                return error.InvalidSeverity;
+                            }
+                        },
+                        .reference => |reference| try validateReference(parser, option.line, reference, visible),
                         else => {
-                            parser.note(option.line, "severity string");
+                            parser.note(option.line, "severity string or variable reference");
                             return error.InvalidSeverity;
                         },
-                    };
-                    if (Severity.parse(text) == null) {
-                        parser.note(option.line, "severity value");
-                        return error.InvalidSeverity;
                     }
                     has_severity = true;
                 }
-                if (std.mem.eql(u8, option.key, "message")) {
-                    const text = switch (option.value) {
-                        .string => |value| value,
-                        else => {
-                            parser.note(option.line, "message string");
-                            return error.MissingMessage;
+                if (std.mem.eql(u8, option.key, "message") or
+                    std.mem.eql(u8, option.key, "tag") or
+                    std.mem.eql(u8, option.key, "note"))
+                {
+                    switch (option.value) {
+                        .string => |text| {
+                            if (text.len > max_text_bytes) {
+                                parser.note(option.line, "text");
+                                return error.TooManyItems;
+                            }
+                            if (std.mem.eql(u8, option.key, "message")) {
+                                if (text.len == 0) {
+                                    parser.note(option.line, "message");
+                                    return error.MissingMessage;
+                                }
+                                has_message = true;
+                            }
                         },
-                    };
-                    if (text.len == 0) {
-                        parser.note(option.line, "message");
-                        return error.MissingMessage;
+                        .reference => |reference| {
+                            try validateReference(parser, option.line, reference, visible);
+                            if (std.mem.eql(u8, option.key, "message")) has_message = true;
+                        },
+                        else => {
+                            parser.note(option.line, "text or variable reference");
+                            return error.InvalidOptionValue;
+                        },
                     }
-                    has_message = true;
                 }
             }
             if (!has_severity) return error.MissingSeverity;
@@ -1606,4 +1678,97 @@ test "a sub-script export becomes visible after run" {
     try std.testing.expectEqual(@as(usize, 0), caller.exports.len);
     try std.testing.expectEqual(@as(usize, 1), caller.runs.len);
     try std.testing.expectEqualStrings("helper", caller.runs[0]);
+}
+
+test "parses dotted variable references in call and emit options" {
+    var script = try parse(std.testing.allocator,
+        \\script "refs" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        sig = rf { payload = "protocol=Princeton" }
+        \\        rf { payload = sig.protocol }
+        \\        emit finding { severity = "info", message = sig.protocol, tag = sig.name }
+        \\    end
+        \\end
+    );
+    defer script.deinit();
+
+    const step = script.steps[0];
+    const call = switch (step.body[1]) {
+        .call => |value| value,
+        else => return error.UnexpectedToken,
+    };
+    try std.testing.expectEqualStrings("payload", call.options[0].key);
+    switch (call.options[0].value) {
+        .reference => |reference| try std.testing.expectEqualStrings("sig.protocol", reference),
+        else => return error.UnexpectedToken,
+    }
+
+    const emit = switch (step.body[2]) {
+        .emit => |value| value,
+        else => return error.UnexpectedToken,
+    };
+    const finding = switch (emit) {
+        .finding => |options| options,
+        else => return error.UnexpectedToken,
+    };
+    try std.testing.expectEqual(@as(usize, 3), finding.len);
+    switch (finding[1].value) {
+        .reference => |reference| try std.testing.expectEqualStrings("sig.protocol", reference),
+        else => return error.UnexpectedToken,
+    }
+    switch (finding[2].value) {
+        .reference => |reference| try std.testing.expectEqualStrings("sig.name", reference),
+        else => return error.UnexpectedToken,
+    }
+}
+
+test "rejects references to variables that are not visible" {
+    try std.testing.expectError(error.UnknownVariable, parse(std.testing.allocator,
+        \\script "bad-ref" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        rf { payload = missing.value }
+        \\    end
+        \\end
+    ));
+}
+
+test "rejects a trailing dot in a reference" {
+    try std.testing.expectError(error.InvalidReference, parse(std.testing.allocator,
+        \\script "bad-ref" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        sig = rf { payload = "x" }
+        \\        rf { payload = sig. }
+        \\    end
+        \\end
+    ));
+}
+
+test "rejects payload values that are neither strings nor references" {
+    try std.testing.expectError(error.InvalidOptionValue, parse(std.testing.allocator,
+        \\script "bad-payload" do
+        \\    use "pack.rf"
+        \\    cap rf = subghz.read
+        \\    step "s" do
+        \\        rf { payload = 42 }
+        \\    end
+        \\end
+    ));
+}
+
+test "rejects a region that is neither a string nor from_policy" {
+    try std.testing.expectError(error.UnknownOptionKey, parse(std.testing.allocator,
+        \\script "bad-region" do
+        \\    use "pack.rf"
+        \\    cap tx = subghz.transmit { region = eu }
+        \\    step "s" do
+        \\        tx { payload = "frame" }
+        \\    end
+        \\end
+    ));
 }
