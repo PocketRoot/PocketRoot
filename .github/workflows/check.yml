@@ -17,15 +17,18 @@ jobs:
         with:
           path: engine
 
-      # Optional sibling repo. When unavailable, the catalog tests skip
-      # (error.SkipZigTest) and build.zig omits the vulns smoke step, so the
-      # engine repo stays independently checkable.
+      # Optional sibling repo. It is a *separate private* repo, so the default
+      # GITHUB_TOKEN cannot read it: provide a VULNDB_TOKEN secret (fine-grained
+      # PAT with Contents: read) to enable the catalog tests. Without it the
+      # checkout fails, the tests skip (error.SkipZigTest) and build.zig omits the
+      # vulns smoke step - the engine repo stays independently checkable.
       - name: Checkout vulnerability db (optional)
         continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/PocketRootVulnerabilityDb
           path: PocketRootVulnerabilityDb
+          token: ${{ secrets.VULNDB_TOKEN || github.token }}
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
