@@ -13,6 +13,7 @@ what the software does and how to verify it. Every behavioural claim is anchored
 | [architecture/repository-map](architecture/repository-map.md) | Repository layout, cross-repository coupling, read-only references |
 | [capabilities/facts](capabilities/facts.md) | Generated counts: plugins, kinds, operations, tests, smoke checks, catalogue size |
 | [capabilities/matrix](capabilities/matrix.md) | Capability by capability: real I/O, simulated, or not wired |
+| [capabilities/campaign](capabilities/campaign.md) | Campaign control plane: scope, approvals, configurable TTL, stop, ledger, surface report |
 | [capabilities/network](capabilities/network.md) | Network capabilities: implementation, limits, failure semantics |
 | [capabilities/offline-analysis](capabilities/offline-analysis.md) | Offline protocol plugins and analysis depth |
 | [capabilities/security-model](capabilities/security-model.md) | Capability kernel, audit log, region gating, IPC security properties |

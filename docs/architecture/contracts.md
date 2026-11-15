@@ -129,6 +129,37 @@ from a recorded stream (`--transport loopback --frames <path>`) and writes respo
 to stdout or `--output <path>`. Responses are byte-identical to a device's, so external
 tooling can replay a session without the engine.
 
+### 3.2 Campaign control plane
+
+`services/control.zig` gates actions against a target rather than device operations. The
+CLI exposes it through `campaign` subcommands.
+
+```zig
+Scope    { id, targets[], techniques[], expires_at_unix, approval_ttl_seconds, max_actions }
+Approval { id, scope_id, action_id, target, technique, params_hash, operator, reason,
+           created_at_unix, expires_at_unix, used }
+ActionRequest { action_id, target, technique, params_hash }
+```
+
+`evaluate` is the single decision point: stop marker, armed phase, scope expiry, scope match,
+action budget, target, technique, then a live single-use approval bound to the exact action.
+The approval is consumed before the action starts; a failed action does not refund it.
+
+The TTL is configurable per scope (`approval_ttl_seconds`, 1-86400, default 900) and the
+effective expiry is the earlier of that TTL and the scope expiry. The read-only surface
+(`services/surface.zig`) never calls `evaluate` and never needs an approval.
+
+```
+campaign init --scope <scope.json> [--dir <dir>]
+campaign arm|stop|status [--dir <dir>]
+campaign surface --catalog <catalog.jsonl> [--json] <path>...
+campaign approve <ACTION-ID> --reason <text> --confirm <ACTION-ID>
+campaign run <ACTION-ID> --dry-run
+```
+
+In this build `campaign run` refuses anything except `--dry-run`: the gate, consumption and
+ledger are real, the executor is not.
+
 ## 4. IPC wire format (`src/device/ipc.zig`)
 
 Little-endian frame layout:
@@ -173,6 +204,11 @@ A response payload starts with the `capability.Status` byte followed by the data
 | `pocketroot.script.v1` | `services/script.zig` | DSL source and limits |
 | `pocketroot.project.v1` | CLI JSON output | Project report |
 | `pocketroot.library.v1` | `services/library.zig` | Saved library entries |
+| `pocketroot.scope.v1` | `services/control.zig` | Campaign scope, targets and configurable approval TTL |
+| `pocketroot.approval.v1` | `services/control.zig` | One single-use human approval |
+| `pocketroot.campaign.v1` | `services/control.zig` | Campaign phase and action count |
+| `pocketroot.ledger.v1` | `services/control.zig` | Hash-chained campaign ledger entry |
+| `pocketroot.surface.v1` | `services/surface.zig` | Attack-surface report and candidate actions |
 
 The schema identifier is the compatibility boundary. Changing fields without bumping the
 version breaks consumers; `UnsupportedCatalogSchema` reports a mismatch.

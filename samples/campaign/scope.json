@@ -1,0 +1,9 @@
+{
+  "schema": "pocketroot.scope.v1",
+  "scope_id": "lab-repro-hosts",
+  "targets": ["192.0.2.0/24"],
+  "techniques": ["validate", "exploit"],
+  "expires_at_unix": 4102444800,
+  "approval_ttl_seconds": 600,
+  "max_actions": 16
+}

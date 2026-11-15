@@ -41,6 +41,14 @@ PocketRoot device request infrared read --payload capture --audit audit.jsonl
 PocketRoot device serve --transport stdio --audit audit.jsonl
 PocketRoot audit audit.jsonl
 
+# scope -> read-only surface -> human approval with a configurable TTL -> gated dry run
+PocketRoot campaign init --scope samples/campaign/scope.json
+PocketRoot campaign arm
+PocketRoot campaign surface --catalog samples/campaign/catalog.jsonl --protocol nmap samples/network/lab-repro-hosts.xml
+PocketRoot campaign approve ACTION-1 --reason "ticket SEC-1" --confirm ACTION-1
+PocketRoot campaign run ACTION-1 --dry-run
+PocketRoot campaign stop
+
 # probe explicit TCP ports, then match observations against the catalogue
 PocketRoot tcp-scan 192.0.2.10 22,80,443
 PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
@@ -52,6 +60,13 @@ exercises policy, locks, audit and framing rather than hardware.
 
 `script run` compiles the DSL and executes it against the simulated backend; it prints
 the final status, one audit line per capability request, and every emitted finding.
+
+`campaign surface` is read-only and needs no approval: it turns catalogued observations
+into ranked candidate actions and writes `.pocketroot/surface.json`. `campaign approve`
+mints a single-use approval whose TTL comes from the scope (`approval_ttl_seconds`, default
+15 minutes); `campaign run` only supports `--dry-run` in this build, but the scope check,
+approval consumption, stop marker and hash-chained ledger are real. `campaign stop` is
+checked before any action starts. See [docs/capabilities/campaign.md](docs/capabilities/campaign.md).
 
 ## Repository layout
 

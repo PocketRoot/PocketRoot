@@ -57,6 +57,11 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "campaign")) {
+        try runCampaignCommand(arena, init.io, stdout, args[2..]);
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "network")) {
         if (args.len != 2) {
             try stdout.print("usage: network\n", .{});
@@ -957,6 +962,14 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                 [--subject s] [--region r] [--allow-active] [--audit path]
         \\                       Serve PKRT frames from stdin or a recorded stream
         \\  audit [--json] <path>  Summarize an exported audit log
+        \\  campaign init --scope <scope.json> [--dir <dir>]
+        \\  campaign arm|stop|status [--dir <dir>]
+        \\  campaign surface --catalog <catalog.jsonl> [--json] <path>...
+        \\                       Read-only attack surface with candidate actions
+        \\  campaign approve <ACTION-ID> --reason <text> --confirm <ACTION-ID>
+        \\                       Single-use human approval with the scope's TTL
+        \\  campaign run <ACTION-ID> --dry-run
+        \\                       Verify the gate and consume the approval
         \\  analyze [--json] <path>  Analyze a protocol file by extension
         \\  analyze [--json] [--base <hex>] [--arch <thumb|arm>] --protocol firmware <path>
         \\                       Firmware triage with Thumb disassembly
@@ -981,6 +994,12 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot device request subghz transmit --authorize-active
         \\  PocketRoot device serve --transport stdio
         \\  PocketRoot audit audit.jsonl
+        \\  PocketRoot campaign init --scope samples/campaign/scope.json
+        \\  PocketRoot campaign arm
+        \\  PocketRoot campaign surface --catalog catalog-v2.jsonl samples/network/lab-repro-hosts.xml
+        \\  PocketRoot campaign approve ACTION-1 --reason "ticket SEC-1" --confirm ACTION-1
+        \\  PocketRoot campaign run ACTION-1 --dry-run
+        \\  PocketRoot campaign stop
         \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
         \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
@@ -2441,4 +2460,777 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "device request") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "device serve") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "audit [--json]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "campaign surface") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "campaign stop") != null);
+}
+
+const campaign_default_dir = ".pocketroot";
+
+fn campaignPath(allocator: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    return std.fs.path.join(allocator, &.{ dir, name });
+}
+
+fn loadCampaignScope(allocator: std.mem.Allocator, io: Io, dir: []const u8) !PocketRoot.services.control.Scope {
+    const path = try campaignPath(allocator, dir, "scope.json");
+    defer allocator.free(path);
+    const data = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(PocketRoot.services.control.max_json_bytes));
+    defer allocator.free(data);
+    return PocketRoot.services.control.parseScope(allocator, data);
+}
+
+fn campaignNow(io: Io) i64 {
+    return std.Io.Timestamp.now(io, .real).toSeconds();
+}
+
+fn printCampaignUsage(writer: *Io.Writer) !void {
+    try writer.print(
+        \\usage: campaign <command> [options]
+        \\
+        \\  init --scope <scope.json> [--dir <dir>]
+        \\  arm [--dir <dir>]
+        \\  stop [--dir <dir>]
+        \\  status [--json] [--dir <dir>]
+        \\  surface --catalog <catalog.jsonl> [--json] <path>... [--protocol <id> <path>]...
+        \\  approve <ACTION-ID> --reason <text> --confirm <ACTION-ID> [--operator <name>]
+        \\  run <ACTION-ID> --dry-run [--dir <dir>]
+        \\
+        \\The default campaign directory is .pocketroot. surface is read-only and
+        \\needs no approval; approve is a deliberate human action with a configurable
+        \\TTL from the scope; stop is checked before every action.
+        \\
+    , .{});
+}
+
+fn runCampaignCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    if (raw.len == 0) {
+        try printCampaignUsage(writer);
+        return error.InvalidArguments;
+    }
+    const sub = raw[0];
+    if (std.mem.eql(u8, sub, "init")) return runCampaignInit(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "arm")) return runCampaignArm(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "stop")) return runCampaignStop(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "status")) return runCampaignStatus(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "surface")) return runCampaignSurface(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "approve")) return runCampaignApprove(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "run")) return runCampaignRun(allocator, io, writer, raw[1..]);
+    try writer.print("unknown campaign command: {s}\n", .{sub});
+    try printCampaignUsage(writer);
+    return error.InvalidArguments;
+}
+
+fn runCampaignInit(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var scope_path: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir")) {
+            if (index + 1 >= raw.len) return error.InvalidArguments;
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--scope")) {
+            if (index + 1 >= raw.len or scope_path != null) return error.InvalidArguments;
+            scope_path = raw[index + 1];
+            index += 2;
+        } else return error.InvalidArguments;
+    }
+    const path = scope_path orelse {
+        try writer.print("campaign init requires --scope <scope.json>\n", .{});
+        return error.InvalidArguments;
+    };
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(PocketRoot.services.control.max_json_bytes)) catch |err| {
+        try writer.print("cannot read scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var scope = PocketRoot.services.control.parseScope(allocator, data) catch |err| {
+        try writer.print("invalid scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+
+    Io.Dir.cwd().createDirPath(io, dir) catch |err| {
+        try writer.print("cannot create campaign directory: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    const approvals = try campaignPath(allocator, dir, "approvals");
+    defer allocator.free(approvals);
+    try Io.Dir.cwd().createDirPath(io, approvals);
+    const scope_copy = try campaignPath(allocator, dir, "scope.json");
+    defer allocator.free(scope_copy);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = scope_copy, .data = data });
+
+    var state = try PocketRoot.services.control.State.init(allocator, .disarmed, scope.id);
+    defer state.deinit();
+    try PocketRoot.services.control.saveState(allocator, io, dir, &state);
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "init",
+        .result = scope.id,
+        .detail = "campaign initialised disarmed",
+    }, campaignNow(io));
+    try writer.print(
+        "campaign initialised: {s} (scope {s}, ttl {d}s, disarmed)\n",
+        .{ dir, scope.id, scope.approval_ttl_seconds },
+    );
+}
+
+fn runCampaignArm(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else return error.InvalidArguments;
+    }
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    const now = campaignNow(io);
+    if (scope.expired(now)) {
+        try writer.print("scope has expired\n", .{});
+        return error.CommandFailed;
+    }
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    try PocketRoot.services.control.clearStop(allocator, io, dir);
+    state.phase = .armed;
+    try PocketRoot.services.control.saveState(allocator, io, dir, &state);
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "arm",
+        .result = scope.id,
+        .detail = "campaign armed",
+    }, now);
+    try writer.print(
+        "campaign armed: {s} (ttl {d}s, expires at {d})\n",
+        .{ dir, scope.approval_ttl_seconds, scope.expires_at_unix },
+    );
+}
+
+fn runCampaignStop(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else return error.InvalidArguments;
+    }
+    const now = campaignNow(io);
+    try PocketRoot.services.control.requestStop(allocator, io, dir);
+    if (PocketRoot.services.control.loadState(allocator, io, dir)) |loaded| {
+        var state = loaded;
+        defer state.deinit();
+        state.phase = .stopped;
+        PocketRoot.services.control.saveState(allocator, io, dir, &state) catch {};
+    } else |_| {}
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "stop",
+        .result = "stopped",
+        .detail = "stop requested; no new action will start",
+    }, now);
+    try writer.print("campaign stopped: {s} (STOP marker set)\n", .{dir});
+}
+
+const ApprovalCounts = struct {
+    total: usize = 0,
+    unused: usize = 0,
+};
+
+fn countApprovals(allocator: std.mem.Allocator, io: Io, dir: []const u8) ApprovalCounts {
+    var result = ApprovalCounts{};
+    const path = campaignPath(allocator, dir, "approvals") catch return result;
+    defer allocator.free(path);
+    var approvals_dir = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return result;
+    defer approvals_dir.close(io);
+    var iterator = approvals_dir.iterate();
+    while (iterator.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+        result.total += 1;
+        const file_path = campaignPath(allocator, path, entry.name) catch continue;
+        defer allocator.free(file_path);
+        if (PocketRoot.services.control.loadApproval(allocator, io, file_path)) |loaded| {
+            var approval = loaded;
+            defer approval.deinit();
+            if (!approval.used) result.unused += 1;
+        } else |_| {}
+    }
+    return result;
+}
+
+fn runCampaignStatus(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var json_output = false;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else return error.InvalidArguments;
+    }
+    const state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        if (json_output) {
+            try writer.print("{{\"schema\":\"pocketroot.campaign-status.v1\",\"initialized\":false}}\n", .{});
+        } else {
+            try writer.print("campaign not initialised in {s}: {s}\n", .{ dir, @errorName(err) });
+        }
+        return;
+    };
+    var loaded_state = state;
+    defer loaded_state.deinit();
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    const approvals = countApprovals(allocator, io, dir);
+    const stopped = PocketRoot.services.control.isStopped(allocator, io, dir);
+    if (json_output) {
+        try writer.print(
+            "{{\"schema\":\"pocketroot.campaign-status.v1\",\"initialized\":true,\"phase\":\"{s}\",\"scope_id\":\"{s}\",\"approval_ttl_seconds\":{d},\"expires_at_unix\":{d},\"actions_used\":{d},\"max_actions\":{d},\"stopped\":{s},\"approvals_total\":{d},\"approvals_unused\":{d}}}\n",
+            .{
+                @tagName(loaded_state.phase),
+                scope.id,
+                scope.approval_ttl_seconds,
+                scope.expires_at_unix,
+                loaded_state.actions_used,
+                scope.max_actions,
+                if (stopped) "true" else "false",
+                approvals.total,
+                approvals.unused,
+            },
+        );
+        return;
+    }
+    try writer.print("campaign: {s}\n", .{dir});
+    try writer.print("phase: {s}\n", .{@tagName(loaded_state.phase)});
+    try writer.print("scope: {s}\n", .{scope.id});
+    try writer.print("targets: {d}, techniques: {d}\n", .{ scope.targets.len, scope.techniques.len });
+    try writer.print("approval ttl: {d}s, scope expires: {d}\n", .{ scope.approval_ttl_seconds, scope.expires_at_unix });
+    try writer.print("actions used: {d}/{d}\n", .{ loaded_state.actions_used, scope.max_actions });
+    try writer.print("stop: {s}\n", .{if (stopped) "yes" else "no"});
+    try writer.print("approvals: {d} unused / {d} total\n", .{ approvals.unused, approvals.total });
+}
+
+fn runCampaignSurface(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var catalog_path: ?[]const u8 = null;
+    var json_output = false;
+    var inputs_raw: std.ArrayList([:0]const u8) = .empty;
+    defer inputs_raw.deinit(allocator);
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--catalog") and index + 1 < raw.len) {
+            catalog_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else {
+            try inputs_raw.append(allocator, raw[index]);
+            index += 1;
+        }
+    }
+    const catalog_file = catalog_path orelse {
+        try writer.print("campaign surface requires --catalog <catalog.jsonl>\n", .{});
+        return error.InvalidArguments;
+    };
+    const inputs = parseProjectInputs(allocator, inputs_raw.items) catch {
+        try printCampaignUsage(writer);
+        return error.InvalidArguments;
+    };
+    defer allocator.free(inputs);
+
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    const now = campaignNow(io);
+    if (scope.expired(now)) {
+        try writer.print("scope has expired\n", .{});
+        return error.CommandFailed;
+    }
+
+    const catalog_data = Io.Dir.cwd().readFileAlloc(io, catalog_file, allocator, .limited(64 * 1024 * 1024)) catch |err| {
+        try writer.print("cannot load vulnerability catalog: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(catalog_data);
+    var catalog = PocketRoot.services.vulnerability_catalog.Catalog.load(allocator, catalog_data) catch |err| {
+        try writer.print("invalid vulnerability catalog: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer catalog.deinit();
+
+    var runtime = PocketRoot.simulator.Runtime.init(
+        allocator,
+        io,
+        PocketRoot.apps.builtinApps(),
+        PocketRoot.protocols.registry.builtinProtocols(),
+    );
+    defer runtime.deinit();
+    var project = PocketRoot.Project.init(allocator);
+    defer project.deinit();
+    for (inputs) |input| importProjectInput(&runtime, &project, inputs, input) catch |err| {
+        try writer.print("cannot import {s}: {s}\n", .{ input.path, @errorName(err) });
+        return error.CommandFailed;
+    };
+    var graph = PocketRoot.AssetGraph.build(allocator, project.analyses.items) catch |err| {
+        try writer.print("cannot build asset graph: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer graph.deinit();
+    var matches = PocketRoot.services.vulnerability_matcher.match(allocator, &graph, catalog.vulnerabilities, .{}) catch |err| {
+        try writer.print("matching failed: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer matches.deinit();
+
+    var report = PocketRoot.services.surface.build(allocator, &graph, catalog.vulnerabilities, &matches, &scope, now) catch |err| {
+        try writer.print("cannot build attack surface: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer report.deinit();
+
+    const surface_path = try campaignPath(allocator, dir, "surface.json");
+    defer allocator.free(surface_path);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    try report.writeJson(&output.writer);
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = surface_path, .data = output.written() }) catch |err| {
+        try writer.print("cannot write surface: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "surface",
+        .result = "ok",
+        .detail = "read-only attack surface generated",
+    }, now);
+
+    if (json_output) {
+        try report.writeJson(writer);
+    } else {
+        try report.writeMarkdown(writer);
+        try writer.print("\nsurface written to {s}\n", .{surface_path});
+    }
+}
+
+fn runCampaignApprove(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var action_id: ?[]const u8 = null;
+    var reason: ?[]const u8 = null;
+    var confirm: ?[]const u8 = null;
+    var operator: []const u8 = "operator";
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--reason") and index + 1 < raw.len) {
+            reason = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--confirm") and index + 1 < raw.len) {
+            confirm = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--operator") and index + 1 < raw.len) {
+            operator = raw[index + 1];
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (action_id != null) return error.InvalidArguments;
+            action_id = raw[index];
+            index += 1;
+        }
+    }
+    const id = action_id orelse {
+        try writer.print("campaign approve requires <ACTION-ID> --reason <text> --confirm <ACTION-ID>\n", .{});
+        return error.InvalidArguments;
+    };
+    const why = reason orelse {
+        try writer.print("approval requires --reason (recorded in the ledger)\n", .{});
+        return error.InvalidArguments;
+    };
+    const typed = confirm orelse {
+        try writer.print("approval requires --confirm <ACTION-ID>; there is no --yes\n", .{});
+        return error.InvalidArguments;
+    };
+    if (!std.mem.eql(u8, typed, id)) {
+        try writer.print("confirmation does not match {s}; nothing approved\n", .{id});
+        return error.InvalidArguments;
+    }
+
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    if (state.phase != .armed) {
+        try writer.print("campaign is {s}; run campaign arm first\n", .{@tagName(state.phase)});
+        return error.CommandFailed;
+    }
+    const surface_path = try campaignPath(allocator, dir, "surface.json");
+    defer allocator.free(surface_path);
+    var stored = PocketRoot.services.surface.load(allocator, io, surface_path) catch |err| {
+        try writer.print("cannot load surface: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer stored.deinit();
+    const action = stored.find(id) orelse {
+        try writer.print("unknown action: {s}\n", .{id});
+        return error.CommandFailed;
+    };
+    if (!std.mem.eql(u8, stored.scope_id, scope.id)) {
+        try writer.print("surface belongs to another scope\n", .{});
+        return error.CommandFailed;
+    }
+    if (!std.mem.eql(u8, action.feasibility, "feasible")) {
+        try writer.print("action is not feasible ({s}); refusing to approve\n", .{action.feasibility});
+        return error.CommandFailed;
+    }
+    const technique = std.meta.stringToEnum(PocketRoot.services.control.Technique, action.technique) orelse {
+        try writer.print("unknown technique: {s}\n", .{action.technique});
+        return error.CommandFailed;
+    };
+    const now = campaignNow(io);
+    var approval = PocketRoot.services.control.createApproval(allocator, io, dir, &scope, .{
+        .action_id = action.id,
+        .target = action.target,
+        .technique = technique,
+        .params_hash = action.params_hash,
+    }, operator, why, now) catch |err| {
+        try writer.print("cannot approve {s}: {s}\n", .{ id, @errorName(err) });
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "approve",
+        .action_id = approval.action_id,
+        .approval_id = approval.id,
+        .target = approval.target,
+        .technique = @tagName(approval.technique),
+        .result = "approved",
+        .detail = approval.reason,
+    }, now);
+    try writer.print(
+        "approved {s}: {s} on {s} ({s})\napproval {s} expires at {d} (ttl {d}s, single use)\n",
+        .{
+            approval.action_id,
+            action.vulnerability_id,
+            approval.target,
+            @tagName(approval.technique),
+            approval.id,
+            approval.expires_at_unix,
+            scope.approval_ttl_seconds,
+        },
+    );
+}
+
+fn mapCampaignDenial(err: anyerror) []const u8 {
+    return switch (err) {
+        error.stopped => "campaign is stopped",
+        error.disarmed => "campaign is disarmed",
+        error.scope_expired => "scope has expired",
+        error.target_not_allowed => "target is outside the scope",
+        error.technique_not_allowed => "technique is not allowed by the scope",
+        error.approval_missing => "no approval for this action",
+        error.approval_invalid => "approval is unreadable",
+        error.approval_expired => "approval has expired",
+        error.approval_used => "approval was already consumed",
+        error.state_scope_mismatch => "campaign state belongs to another scope",
+        error.approval_scope_mismatch => "approval belongs to another scope",
+        error.approval_action_mismatch => "approval belongs to another action",
+        error.approval_target_mismatch => "approval belongs to another target",
+        error.approval_params_mismatch => "approval params do not match the action",
+        error.approval_technique_mismatch => "approval technique does not match the action",
+        error.budget_exhausted => "action budget exhausted",
+        else => "approval check failed",
+    };
+}
+
+fn runCampaignRun(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var action_id: ?[]const u8 = null;
+    var dry_run = false;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--dry-run")) {
+            dry_run = true;
+            index += 1;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (action_id != null) return error.InvalidArguments;
+            action_id = raw[index];
+            index += 1;
+        }
+    }
+    const id = action_id orelse {
+        try writer.print("campaign run requires <ACTION-ID> --dry-run\n", .{});
+        return error.InvalidArguments;
+    };
+
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    const surface_path = try campaignPath(allocator, dir, "surface.json");
+    defer allocator.free(surface_path);
+    var stored = PocketRoot.services.surface.load(allocator, io, surface_path) catch |err| {
+        try writer.print("cannot load surface: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer stored.deinit();
+    const action = stored.find(id) orelse {
+        try writer.print("unknown action: {s}\n", .{id});
+        return error.CommandFailed;
+    };
+    if (!std.mem.eql(u8, stored.scope_id, scope.id)) {
+        try writer.print("surface belongs to another scope\n", .{});
+        return error.CommandFailed;
+    }
+    if (!std.mem.eql(u8, action.feasibility, "feasible")) {
+        try writer.print("action is not feasible ({s})\n", .{action.feasibility});
+        return error.CommandFailed;
+    }
+    const technique = std.meta.stringToEnum(PocketRoot.services.control.Technique, action.technique) orelse {
+        try writer.print("unknown technique: {s}\n", .{action.technique});
+        return error.CommandFailed;
+    };
+    const request = PocketRoot.services.control.ActionRequest{
+        .action_id = action.id,
+        .target = action.target,
+        .technique = technique,
+        .params_hash = action.params_hash,
+    };
+    const now = campaignNow(io);
+    PocketRoot.services.control.evaluate(allocator, io, dir, &scope, &state, request, now) catch |err| {
+        try writer.print("denied: {s}\n", .{mapCampaignDenial(err)});
+        PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+            .event = "denied",
+            .action_id = action.id,
+            .target = action.target,
+            .technique = @tagName(technique),
+            .result = @errorName(err),
+            .detail = mapCampaignDenial(err),
+        }, now) catch {};
+        return error.CommandFailed;
+    };
+    if (!dry_run) {
+        try writer.print("no executor is installed; re-run with --dry-run\n", .{});
+        PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+            .event = "denied",
+            .action_id = action.id,
+            .target = action.target,
+            .technique = @tagName(technique),
+            .result = "no-executor",
+            .detail = "real execution is not installed in this build",
+        }, now) catch {};
+        return error.CommandFailed;
+    }
+    const approval_file = try PocketRoot.services.control.approvalPath(allocator, dir, action.id);
+    defer allocator.free(approval_file);
+    var approval = PocketRoot.services.control.loadApproval(allocator, io, approval_file) catch |err| {
+        try writer.print("cannot load approval: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    PocketRoot.services.control.consumeApproval(allocator, io, approval_file, now) catch |err| {
+        try writer.print("cannot consume approval: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "run-start",
+        .action_id = action.id,
+        .approval_id = approval.id,
+        .target = action.target,
+        .technique = @tagName(technique),
+        .result = "started",
+        .detail = action.vulnerability_id,
+    }, now);
+    try writer.print(
+        "dry-run {s}: {s} on {s} ({s})\napproval {s} consumed before the action\nstop: campaign stop (checked before the next action)\n",
+        .{ action.id, action.vulnerability_id, action.target, @tagName(technique), approval.id },
+    );
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "run-dry",
+        .action_id = action.id,
+        .approval_id = approval.id,
+        .target = action.target,
+        .technique = @tagName(technique),
+        .result = "dry-run",
+        .detail = "no traffic sent",
+    }, now);
+    if (PocketRoot.services.control.isStopped(allocator, io, dir)) {
+        try writer.print("stop marker observed; no further action will start\n", .{});
+    }
+}
+
+test "campaign surface, approval and stop gate a dry run" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    defer std.testing.allocator.free(base);
+    try Io.Dir.cwd().createDirPath(std.testing.io, base);
+    const campaign_dir = try std.fs.path.join(std.testing.allocator, &.{ base, "campaign" });
+    defer std.testing.allocator.free(campaign_dir);
+    const scope_path = try std.fs.path.join(std.testing.allocator, &.{ base, "scope.json" });
+    defer std.testing.allocator.free(scope_path);
+    const catalog_path = try std.fs.path.join(std.testing.allocator, &.{ base, "catalog.jsonl" });
+    defer std.testing.allocator.free(catalog_path);
+
+    const scope_data =
+        \\{"schema":"pocketroot.scope.v1","scope_id":"test-scope","targets":["192.0.2.0/24"],"techniques":["validate","exploit"],"expires_at_unix":4102444800,"approval_ttl_seconds":60,"max_actions":4}
+    ;
+    try Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = scope_path, .data = scope_data });
+    const catalog_data =
+        \\{"schema":"pocketroot.vulnerability.v2","id":"CVE-TEST-0001","title":"Apache 2.4.49 test","severity":"critical","cvss_score":9.8,"cvss_vector":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H","affected":[{"vendor":"apache","product":"Apache httpd","versions":[{"kind":"dotted_range","introduced":"2.4.0","fixed":"2.4.50"}]}],"reproducibility":{"tier":"container","reason":"network-service"}}
+    ;
+    try Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = catalog_path, .data = catalog_data });
+
+    const scope_z = try std.testing.allocator.dupeZ(u8, scope_path);
+    defer std.testing.allocator.free(scope_z);
+    const catalog_z = try std.testing.allocator.dupeZ(u8, catalog_path);
+    defer std.testing.allocator.free(catalog_z);
+    const dir_z = try std.testing.allocator.dupeZ(u8, campaign_dir);
+    defer std.testing.allocator.free(dir_z);
+
+    var buffer: [16 * 1024]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var args = [_][:0]const u8{ "init", "--scope", scope_z, "--dir", dir_z };
+    try runCampaignCommand(std.testing.allocator, std.testing.io, &writer, &args);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "ttl 60s") != null);
+
+    var buffer_arm: [4096]u8 = undefined;
+    var writer_arm: Io.Writer = .fixed(&buffer_arm);
+    var arm_args = [_][:0]const u8{ "arm", "--dir", dir_z };
+    try runCampaignCommand(std.testing.allocator, std.testing.io, &writer_arm, &arm_args);
+
+    var buffer_surface: [16 * 1024]u8 = undefined;
+    var writer_surface: Io.Writer = .fixed(&buffer_surface);
+    var surface_args = [_][:0]const u8{
+        "surface", "--catalog", catalog_z, "--protocol", "nmap", "--dir", dir_z, "samples/network/lab-repro-hosts.xml",
+    };
+    try runCampaignCommand(std.testing.allocator, std.testing.io, &writer_surface, &surface_args);
+    const surface_output = writer_surface.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, surface_output, "feasible: 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, surface_output, "ACTION-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, surface_output, "CVE-TEST-0001") != null);
+
+    var buffer_approve: [4096]u8 = undefined;
+    var writer_approve: Io.Writer = .fixed(&buffer_approve);
+    var approve_args = [_][:0]const u8{
+        "approve", "ACTION-1", "--reason", "ticket SEC-1", "--confirm", "ACTION-1", "--dir", dir_z,
+    };
+    try runCampaignCommand(std.testing.allocator, std.testing.io, &writer_approve, &approve_args);
+    try std.testing.expect(std.mem.indexOf(u8, writer_approve.buffered(), "ttl 60s") != null);
+
+    var buffer_run: [4096]u8 = undefined;
+    var writer_run: Io.Writer = .fixed(&buffer_run);
+    var run_args = [_][:0]const u8{ "run", "ACTION-1", "--dry-run", "--dir", dir_z };
+    try runCampaignCommand(std.testing.allocator, std.testing.io, &writer_run, &run_args);
+    const run_output = writer_run.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, run_output, "dry-run ACTION-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run_output, "consumed before the action") != null);
+
+    var buffer_again: [4096]u8 = undefined;
+    var writer_again: Io.Writer = .fixed(&buffer_again);
+    try std.testing.expectError(error.CommandFailed, runCampaignCommand(
+        std.testing.allocator,
+        std.testing.io,
+        &writer_again,
+        &run_args,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, writer_again.buffered(), "already consumed") != null);
+
+    var buffer_stop: [4096]u8 = undefined;
+    var writer_stop: Io.Writer = .fixed(&buffer_stop);
+    var stop_args = [_][:0]const u8{ "stop", "--dir", dir_z };
+    try runCampaignCommand(std.testing.allocator, std.testing.io, &writer_stop, &stop_args);
+
+    var buffer_stopped: [4096]u8 = undefined;
+    var writer_stopped: Io.Writer = .fixed(&buffer_stopped);
+    var run_stopped_args = [_][:0]const u8{ "run", "ACTION-1", "--dry-run", "--dir", dir_z };
+    try std.testing.expectError(error.CommandFailed, runCampaignCommand(
+        std.testing.allocator,
+        std.testing.io,
+        &writer_stopped,
+        &run_stopped_args,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, writer_stopped.buffered(), "stopped") != null);
+
+    const ledger_path = try std.fs.path.join(std.testing.allocator, &.{ campaign_dir, "ledger.jsonl" });
+    defer std.testing.allocator.free(ledger_path);
+    const ledger = try Io.Dir.cwd().readFileAlloc(std.testing.io, ledger_path, std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(ledger);
+    try std.testing.expect(std.mem.indexOf(u8, ledger, "\"event\":\"approve\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ledger, "\"event\":\"run-dry\"") != null);
 }

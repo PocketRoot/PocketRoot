@@ -19,6 +19,10 @@ The I/O column states where the work actually happens.
 | `device request <kind> <op>` | any | simulated | capability kernel + simulated backend | subject <= 128 B, payload <= 1 MiB | denied/failed exits 1 |
 | `device serve` | any | stdin/file -> stdout/file | PKRT frame loop | 4096 frames, replay rejection | malformed frame aborts |
 | `audit [--json] <path>` | any | filesystem | `services/audit_log.zig` | 8 MiB, 4096 lines | invalid line fails closed |
+| `campaign init|arm|stop|status` | any | filesystem | `services/control.zig` | scope <= 64 KiB, TTL 1-86400 s | unarmed or stopped: exit 1 |
+| `campaign surface` | any | filesystem (read-only) | `services/surface.zig` | 4096 actions, catalogue 64 MiB | expired scope: exit 1 |
+| `campaign approve <ACTION-ID>` | any | filesystem | `services/control.zig` | single-use, scope TTL, no `--yes` | wrong `--confirm` or disarmed: exit 1 |
+| `campaign run <ACTION-ID> --dry-run` | any | none | `services/control.zig` | approval consumed once, stop checked first | missing/used/expired approval or stopped: exit 1 |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |
 | `capture <s> <out> <comp>` | Windows only | real | `pktmon` start/stop/etl2pcap | 1-60 s, 1-64 MB, output <= 80 MiB | refuses overwrite, validates pcapng header and trailer |
@@ -56,6 +60,8 @@ The commands above are exercised by the smoke checks in `build.zig`.
 | `services/automation.zig` | Workflow to capability adapter | Tests and the script CLI |
 | `services/workflow.zig` | Steps, conditions, retries, checkpoint, cancel | Tests and the script CLI |
 | `services/library.zig` | `pocketroot.library.v1` persistence | No CLI entry point |
+| `services/control.zig` | Scope, single-use approvals with configurable TTL, stop, hash-chained ledger | `campaign init|arm|stop|status|approve|run` |
+| `services/surface.zig` | Attack-surface report: access, capability, feasibility, candidate actions | `campaign surface` |
 
 ## 4. Failure semantics
 

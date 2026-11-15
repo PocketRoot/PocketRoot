@@ -95,7 +95,28 @@ is answered with `ReplayedFrame` and never reaches the backend.
 PocketRoot device serve --transport loopback --frames samples/device/request-infrared.pkrt --output responses.pkrt
 ```
 
-## 7. What the model does not provide
+## 7. Campaign control plane
+
+`services/control.zig` is the authorization layer for actions that are not device
+capabilities (network validation and, later, exploitation). It is separate from the
+capability kernel on purpose: the kernel gates a device operation, while the campaign layer
+gates an *action against a target*.
+
+| Property | Implementation |
+|---|---|
+| Default deny | The campaign starts `disarmed`; `evaluate` refuses anything but `armed` |
+| Scope | Exact hostname/IP or IPv4 CIDR; techniques validated against `validate/exploit/credential/lateral` |
+| Approval | Single-use, bound to scope/action/target/params hash; TTL comes from the scope (`approval_ttl_seconds`, default 900 s, maximum 86400 s) and is capped by the scope expiry |
+| No blanket yes | `campaign approve` requires `--reason` and a typed `--confirm <ACTION-ID>`; there is no `--yes` |
+| Consumption | The approval is marked used before the action starts; a failure does not refund it |
+| Stop | `campaign stop` writes `STOP`; `evaluate` checks it before the state, scope or approval |
+| Ledger | `pocketroot.ledger.v1` entries are hash-chained with `prev_hash`; tamper-evident, not signed |
+
+The read-only `campaign surface` needs no approval and sends no traffic. `campaign run`
+only supports `--dry-run` in this build: the gate, consumption and ledger are real, the
+execution is not. See [campaign](campaign.md) for the command flow and limits.
+
+## 8. What the model does not provide
 
 | Missing | Consequence |
 |---|---|
@@ -105,3 +126,6 @@ PocketRoot device serve --transport loopback --frames samples/device/request-inf
 | No rate limiting | Locks provide mutual exclusion, not quotas |
 | No policy source | The caller constructs `Policy`; there is no signed configuration file |
 | No OS permission checks | The kernel does not verify privileges such as those `pktmon` requires |
+| Campaign approvals are local files | A compromised campaign directory can mint approvals; operator identity is a recorded string, not an authenticated principal |
+| Campaign stop is software-only | No hardware inhibit line or watchdog exists; a real device must add both |
+| Network probes bypass the campaign gate | `tcp-scan`, `http-inspect` and `tls-inspect` predate the control plane and do not require an approval |

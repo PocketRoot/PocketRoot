@@ -25,6 +25,8 @@ pub const formats = struct {
 };
 
 pub const services = struct {
+    pub const control = @import("services/control.zig");
+    pub const surface = @import("services/surface.zig");
     pub const storage = @import("services/storage.zig");
     pub const audit_log = @import("services/audit_log.zig");
     pub const device_host = @import("services/device_host.zig");
@@ -162,6 +164,8 @@ test {
         protocols.subghz,
         protocols.firmware,
         services.storage,
+        services.control,
+        services.surface,
         services.audit_log,
         services.device_host,
         services.notification,
