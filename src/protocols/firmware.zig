@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const thumb = @import("../formats/thumb.zig");
 
 pub const block_size = 1024;
 pub const max_entropy_blocks = 4096;
@@ -121,7 +122,7 @@ pub fn inspectVectorTable(data: []const u8, base_address: u32) ?VectorTable {
     const initial_sp = std.mem.readInt(u32, data[0..4], .little);
     const reset = std.mem.readInt(u32, data[4..8], .little);
     const entry_point = reset & ~@as(u32, 1);
-    const thumb = (reset & 1) == 1;
+    const thumb_bit = (reset & 1) == 1;
     const sp_plausible = (initial_sp & 3) == 0 and
         ((initial_sp >= 0x2000_0000 and initial_sp < 0x2100_0000) or
             (initial_sp >= 0x1000_0000 and initial_sp < 0x1100_0000));
@@ -132,10 +133,10 @@ pub fn inspectVectorTable(data: []const u8, base_address: u32) ?VectorTable {
     return .{
         .initial_sp = initial_sp,
         .entry_point = entry_point,
-        .thumb = thumb,
+        .thumb = thumb_bit,
         .sp_plausible = sp_plausible,
         .entry_in_range = entry_in_range,
-        .valid = sp_plausible and thumb and entry_in_range,
+        .valid = sp_plausible and thumb_bit and entry_in_range,
     };
 }
 
@@ -183,6 +184,27 @@ pub fn analyzeWith(
     scanUtf16(data, &stats);
 
     const table = inspectVectorTable(data, options.base_address);
+
+    // Stage F2: bounded Thumb decode. Start at the reset handler when the vector table
+    // is usable, otherwise at file offset 0.
+    const wants_thumb = if (options.architecture) |arch|
+        std.mem.eql(u8, arch, "thumb") or std.mem.eql(u8, arch, "arm") or std.mem.eql(u8, arch, "cortex-m")
+    else
+        true;
+    var listing: thumb.Listing = .{};
+    defer listing.deinit(allocator);
+    var decoded = false;
+    if (wants_thumb and (std.mem.eql(u8, kind, "raw") or std.mem.eql(u8, kind, "elf"))) {
+        var start_offset: usize = 0;
+        if (table) |value| {
+            if (value.valid and value.entry_point >= options.base_address) {
+                const candidate = value.entry_point - options.base_address;
+                if (candidate < data.len) start_offset = candidate;
+            }
+        }
+        listing = thumb.decode(allocator, data, options.base_address, start_offset) catch .{};
+        decoded = true;
+    }
 
     var summary_buffer: [192]u8 = undefined;
     const table_text = if (table) |value|
@@ -235,6 +257,38 @@ pub fn analyzeWith(
         try result.addField("vector_table_valid", "no");
     }
 
+    if (decoded) {
+        try result.addField("disassembly_arch", "thumb");
+        try result.addNumberField("instructions", listing.instructions);
+        try result.addNumberField("unknown_opcodes", listing.unknown);
+        const coverage: usize = if (listing.instructions == 0)
+            0
+        else
+            ((listing.instructions - listing.unknown) * 100) / listing.instructions;
+        try result.addNumberField("decode_coverage_x100", coverage);
+        try result.addNumberField("functions", listing.functions);
+
+        var entry_index: usize = 0;
+        while (entry_index < listing.entries.len and entry_index < 3) : (entry_index += 1) {
+            var key_buffer: [24]u8 = undefined;
+            const key = try std.fmt.bufPrint(&key_buffer, "function_{d}", .{entry_index + 1});
+            var value_buffer: [16]u8 = undefined;
+            const value = try std.fmt.bufPrint(&value_buffer, "0x{x:0>8}", .{listing.entries[entry_index]});
+            try result.addField(key, value);
+        }
+        var sample_index: usize = 0;
+        while (sample_index < listing.sample_count and sample_index < 4) : (sample_index += 1) {
+            var key_buffer: [24]u8 = undefined;
+            const key = try std.fmt.bufPrint(&key_buffer, "insn_{d}", .{sample_index + 1});
+            var line_buffer: [96]u8 = undefined;
+            const sample = listing.samples[sample_index];
+            const line = try std.fmt.bufPrint(&line_buffer, "0x{x:0>8}: {s}", .{ sample.address, sample.slice() });
+            try result.addField(key, line);
+        }
+    } else {
+        try result.addField("disassembly_arch", "none");
+    }
+
     if (high_blocks > 0) {
         var detail_buffer: [160]u8 = undefined;
         const detail = try std.fmt.bufPrint(
@@ -246,6 +300,18 @@ pub fn analyzeWith(
     }
     if (std.mem.eql(u8, kind, "raw") and (table == null or !table.?.valid)) {
         try result.addFinding(.warning, "No Cortex-M vector table detected");
+    }
+    if (decoded and listing.instructions > 0) {
+        const coverage: usize = ((listing.instructions - listing.unknown) * 100) / listing.instructions;
+        if (coverage < 95) {
+            var detail_buffer: [128]u8 = undefined;
+            const detail = try std.fmt.bufPrint(
+                &detail_buffer,
+                "{d}/{d} instructions decoded ({d}%), {d} unknown",
+                .{ listing.instructions - listing.unknown, listing.instructions, coverage, listing.unknown },
+            );
+            try result.addDetailedFinding(.warning, "Thumb decode coverage below 95%", detail, "thumb", "firmware:disasm");
+        }
     }
     return result;
 }
@@ -338,6 +404,32 @@ test "block entropy bounds" {
     }
     const value = blockEntropyX100(&uniform);
     try std.testing.expect(value >= 795 and value <= 805);
+}
+
+test "decodes Thumb and reports coverage metrics" {
+    const sample = try sampleText(std.testing.allocator);
+    defer std.testing.allocator.free(sample);
+
+    var result = try analyzeWith(std.testing.allocator, sample, .{ .base_address = 0x0800_0000 });
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("thumb", findField(&result, "disassembly_arch").?);
+    try std.testing.expect(findField(&result, "instructions") != null);
+    try std.testing.expect(findField(&result, "decode_coverage_x100") != null);
+    try std.testing.expect(findField(&result, "functions") != null);
+    try std.testing.expect(findField(&result, "insn_1") != null);
+    // Entry point 0x08000100 => base + 0x100, so decoding starts inside the image.
+    try std.testing.expect(std.mem.startsWith(u8, findField(&result, "insn_1").?, "0x08000100"));
+}
+
+test "disassembly can be disabled with an explicit architecture" {
+    const sample = try sampleText(std.testing.allocator);
+    defer std.testing.allocator.free(sample);
+
+    var result = try analyzeWith(std.testing.allocator, sample, .{ .architecture = "none" });
+    defer result.deinit();
+    try std.testing.expectEqualStrings("none", findField(&result, "disassembly_arch").?);
+    try std.testing.expect(findField(&result, "instructions") == null);
 }
 
 test "sample survives byte-exact validated migration" {

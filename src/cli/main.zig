@@ -455,6 +455,8 @@ const AnalyzeRequest = struct {
     protocol_id: ?[]const u8,
     path: []const u8,
     json_output: bool,
+    base_address: u32 = 0,
+    architecture: ?[]const u8 = null,
 };
 
 const ProjectInput = struct {
@@ -519,7 +521,10 @@ fn loadAnalysis(
     writer: *Io.Writer,
     request: AnalyzeRequest,
 ) !?PocketRoot.services.workbench.Analysis {
-    return runtime.analyzeProtocolPath(request.protocol_id, request.path) catch |err| switch (err) {
+    return runtime.analyzeProtocolPathWith(request.protocol_id, request.path, .{
+        .base_address = request.base_address,
+        .architecture = request.architecture,
+    }) catch |err| switch (err) {
         error.UnknownProtocol => {
             try writer.print("unknown protocol for: {s}\n", .{request.path});
             try printProtocols(writer, runtime.protocols.protocols);
@@ -557,6 +562,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  migrate [--protocol <id>] <input> <output>
         \\                       Validate and preserve a Flipper file byte-exact
         \\  analyze [--json] <path>  Analyze a protocol file by extension
+        \\  analyze [--json] [--base <hex>] [--arch <thumb|arm>] --protocol firmware <path>
+        \\                       Firmware triage with Thumb disassembly
         \\  analyze [--json] --protocol <id> <path>
         \\  report [--protocol <id>] <path>
         \\  run <app-id> [args]  Run an app in the desktop simulator
@@ -1340,6 +1347,8 @@ fn parseAnalyzeArgs(raw: []const [:0]const u8, allow_json: bool) !AnalyzeRequest
     var protocol_id: ?[]const u8 = null;
     var path: ?[]const u8 = null;
     var json_output = false;
+    var base_address: ?u32 = null;
+    var architecture: ?[]const u8 = null;
     var index: usize = 0;
     while (index < raw.len) {
         if (std.mem.eql(u8, raw[index], "--json")) {
@@ -1349,6 +1358,16 @@ fn parseAnalyzeArgs(raw: []const [:0]const u8, allow_json: bool) !AnalyzeRequest
         } else if (std.mem.eql(u8, raw[index], "--protocol")) {
             if (protocol_id != null or index + 1 >= raw.len) return error.InvalidAnalyzeArgs;
             protocol_id = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--base")) {
+            if (base_address != null or index + 1 >= raw.len) return error.InvalidAnalyzeArgs;
+            const text = raw[index + 1];
+            const digits = if (std.mem.startsWith(u8, text, "0x") or std.mem.startsWith(u8, text, "0X")) text[2..] else text;
+            base_address = std.fmt.parseInt(u32, digits, 16) catch return error.InvalidAnalyzeArgs;
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--arch")) {
+            if (architecture != null or index + 1 >= raw.len) return error.InvalidAnalyzeArgs;
+            architecture = raw[index + 1];
             index += 2;
         } else {
             if (std.mem.startsWith(u8, raw[index], "--") or path != null) return error.InvalidAnalyzeArgs;
@@ -1360,6 +1379,8 @@ fn parseAnalyzeArgs(raw: []const [:0]const u8, allow_json: bool) !AnalyzeRequest
         .protocol_id = protocol_id,
         .path = path orelse return error.InvalidAnalyzeArgs,
         .json_output = json_output,
+        .base_address = base_address orelse 0,
+        .architecture = architecture,
     };
 }
 

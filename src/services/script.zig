@@ -18,6 +18,7 @@ pub const max_options = 32;
 pub const max_name_bytes = 128;
 pub const max_text_bytes = 1024;
 pub const max_time_ms = 10 * 60 * 1000;
+pub const max_loop_count = 64;
 
 pub const Error = error{
     OutOfMemory,
@@ -44,6 +45,8 @@ pub const Error = error{
     UnknownOptionKey,
     TrailingInput,
     InvalidNumber,
+    InvalidLoopBound,
+    UnknownVariable,
 };
 
 pub const Diagnostic = struct {
@@ -85,6 +88,12 @@ const Kind = enum {
     lbrace,
     rbrace,
     equals,
+    eq,
+    neq,
+    lt,
+    lte,
+    gt,
+    gte,
     comma,
     dot,
     semi,
@@ -102,7 +111,8 @@ const Token = struct {
 const keywords = [_][]const u8{
     "script", "do",    "end",  "use",     "budget", "cap",     "step",
     "emit",   "stop",  "info", "warning", "error",  "finding", "from_policy",
-    "true",   "false",
+    "true",   "false", "if",   "then",    "elseif", "else",    "for",
+    "out",    "and",   "or",   "not",
 };
 
 fn keywordKind(text: []const u8) bool {
@@ -148,11 +158,53 @@ pub const Call = struct { cap: []const u8, options: []Option, line: u32 };
 
 pub const Assign = struct { name: []const u8, call: Call, line: u32 };
 
+pub const CmpOp = enum { eq, neq, lt, lte, gt, gte };
+
+pub const Operand = union(enum) {
+    string: []const u8,
+    number: u32,
+    path: []const []const u8,
+};
+
+pub const Comparison = struct {
+    op: CmpOp,
+    left: []const []const u8,
+    right: Operand,
+    line: u32,
+};
+
+pub const Connector = enum { and_op, or_op };
+
+pub const Cond = struct {
+    negated: bool = false,
+    comparisons: []Comparison,
+    connectors: []Connector,
+};
+
+pub const Out = struct { name: []const u8, line: u32 };
+
+pub const If = struct {
+    cond: Cond,
+    then_body: []Stmt,
+    else_body: []Stmt,
+    line: u32,
+};
+
+pub const For = struct {
+    var_name: []const u8,
+    count: u32,
+    body: []Stmt,
+    line: u32,
+};
+
 pub const Stmt = union(enum) {
     call: Call,
     assign: Assign,
     emit: Emit,
     stop: void,
+    out: Out,
+    if_stmt: If,
+    for_stmt: For,
 };
 
 pub const Step = struct { name: []const u8, body: []Stmt, line: u32 };
@@ -232,8 +284,34 @@ fn lex(arena: Allocator, source: []const u8) Error![]Token {
             try tokens.append(arena, .{ .kind = .rbrace, .line = line });
             i += 1;
         } else if (c == '=') {
-            try tokens.append(arena, .{ .kind = .equals, .line = line });
-            i += 1;
+            if (i + 1 < source.len and source[i + 1] == '=') {
+                try tokens.append(arena, .{ .kind = .eq, .line = line });
+                i += 2;
+            } else {
+                try tokens.append(arena, .{ .kind = .equals, .line = line });
+                i += 1;
+            }
+        } else if (c == '~') {
+            if (i + 1 < source.len and source[i + 1] == '=') {
+                try tokens.append(arena, .{ .kind = .neq, .line = line });
+                i += 2;
+            } else return error.UnexpectedCharacter;
+        } else if (c == '<') {
+            if (i + 1 < source.len and source[i + 1] == '=') {
+                try tokens.append(arena, .{ .kind = .lte, .line = line });
+                i += 2;
+            } else {
+                try tokens.append(arena, .{ .kind = .lt, .line = line });
+                i += 1;
+            }
+        } else if (c == '>') {
+            if (i + 1 < source.len and source[i + 1] == '=') {
+                try tokens.append(arena, .{ .kind = .gte, .line = line });
+                i += 2;
+            } else {
+                try tokens.append(arena, .{ .kind = .gt, .line = line });
+                i += 1;
+            }
         } else if (c == ',') {
             try tokens.append(arena, .{ .kind = .comma, .line = line });
             i += 1;
@@ -461,8 +539,186 @@ const Parser = struct {
             _ = self.advance();
             return .{ .stop = {} };
         }
+        if (isKw(token, "out")) {
+            _ = self.advance();
+            const name = try self.expectKind(.ident);
+            return .{ .out = .{ .name = name.text, .line = name.line } };
+        }
+        if (isKw(token, "if")) return .{ .if_stmt = try self.parseIf() };
+        if (isKw(token, "for")) return .{ .for_stmt = try self.parseFor() };
         self.note(token.line, "statement");
         return error.UnexpectedToken;
+    }
+
+    fn parsePath(self: *Parser) Error![]const []const u8 {
+        const arena = self.arenaOf();
+        var parts: std.ArrayList([]const u8) = .empty;
+        const first = try self.expectKind(.ident);
+        try parts.append(arena, first.text);
+        while (self.peek().kind == .dot) {
+            _ = self.advance();
+            const part = try self.expectKind(.ident);
+            try parts.append(arena, part.text);
+        }
+        return parts.toOwnedSlice(arena) catch return error.TooManyItems;
+    }
+
+    fn parseOperand(self: *Parser) Error!Operand {
+        const token = self.peek();
+        switch (token.kind) {
+            .string => {
+                _ = self.advance();
+                return .{ .string = token.text };
+            },
+            .number => {
+                _ = self.advance();
+                return .{ .number = token.value };
+            },
+            .ident => return .{ .path = try self.parsePath() },
+            else => {
+                self.note(token.line, "operand");
+                return error.UnexpectedToken;
+            },
+        }
+    }
+
+    fn parseComparison(self: *Parser) Error!Comparison {
+        const start = self.peek();
+        const left = try self.parsePath();
+        const token = self.peek();
+        const op: CmpOp = switch (token.kind) {
+            .eq => .eq,
+            .neq => .neq,
+            .lt => .lt,
+            .lte => .lte,
+            .gt => .gt,
+            .gte => .gte,
+            else => {
+                self.note(token.line, "comparison operator");
+                return error.UnexpectedToken;
+            },
+        };
+        _ = self.advance();
+        self.skipNewlines();
+        const right = try self.parseOperand();
+        return .{ .op = op, .left = left, .right = right, .line = start.line };
+    }
+
+    fn parseCond(self: *Parser) Error!Cond {
+        const arena = self.arenaOf();
+        var negated = false;
+        if (isKw(self.peek(), "not")) {
+            _ = self.advance();
+            negated = true;
+        }
+        var comparisons: std.ArrayList(Comparison) = .empty;
+        var connectors: std.ArrayList(Connector) = .empty;
+        try comparisons.append(arena, try self.parseComparison());
+        while (true) {
+            const token = self.peek();
+            const connector: Connector = if (isKw(token, "and"))
+                .and_op
+            else if (isKw(token, "or"))
+                .or_op
+            else
+                break;
+            _ = self.advance();
+            try connectors.append(arena, connector);
+            self.skipNewlines();
+            try comparisons.append(arena, try self.parseComparison());
+        }
+        return .{
+            .negated = negated,
+            .comparisons = try comparisons.toOwnedSlice(arena),
+            .connectors = try connectors.toOwnedSlice(arena),
+        };
+    }
+
+    fn parseBlockBody(self: *Parser) Error![]Stmt {
+        const arena = self.arenaOf();
+        var body: std.ArrayList(Stmt) = .empty;
+        while (true) {
+            self.skipNewlines();
+            const token = self.peek();
+            if (token.kind == .eof) {
+                self.note(token.line, "end");
+                return error.MissingEnd;
+            }
+            if (isKw(token, "end") or isKw(token, "else") or isKw(token, "elseif")) break;
+            if (body.items.len >= max_statements_per_step) {
+                self.note(token.line, "statements");
+                return error.TooManyItems;
+            }
+            body.append(arena, try self.parseStatement()) catch return error.TooManyItems;
+        }
+        return body.toOwnedSlice(arena) catch return error.TooManyItems;
+    }
+
+    fn parseIf(self: *Parser) Error!If {
+        const arena = self.arenaOf();
+        const keyword = self.peek();
+        _ = try self.expectKeyword("if");
+        const cond = try self.parseCond();
+        try self.expectKeyword("then");
+        const then_body = try self.parseBlockBody();
+
+        var else_body: []Stmt = &.{};
+        if (isKw(self.peek(), "elseif")) {
+            const nested = try self.parseIfTail();
+            else_body = arena.dupe(Stmt, &.{.{ .if_stmt = nested }}) catch return error.TooManyItems;
+        } else if (isKw(self.peek(), "else")) {
+            _ = self.advance();
+            else_body = try self.parseBlockBody();
+            _ = try self.expectKeyword("end");
+        } else {
+            _ = try self.expectKeyword("end");
+        }
+        return .{ .cond = cond, .then_body = then_body, .else_body = else_body, .line = keyword.line };
+    }
+
+    /// Parses the remainder of an elseif chain; consumes the shared closing end.
+    fn parseIfTail(self: *Parser) Error!If {
+        const arena = self.arenaOf();
+        const keyword = self.peek();
+        _ = try self.expectKeyword("elseif");
+        const cond = try self.parseCond();
+        try self.expectKeyword("then");
+        const then_body = try self.parseBlockBody();
+
+        var else_body: []Stmt = &.{};
+        if (isKw(self.peek(), "elseif")) {
+            const nested = try self.parseIfTail();
+            else_body = arena.dupe(Stmt, &.{.{ .if_stmt = nested }}) catch return error.TooManyItems;
+        } else if (isKw(self.peek(), "else")) {
+            _ = self.advance();
+            else_body = try self.parseBlockBody();
+            _ = try self.expectKeyword("end");
+        } else {
+            _ = try self.expectKeyword("end");
+        }
+        return .{ .cond = cond, .then_body = then_body, .else_body = else_body, .line = keyword.line };
+    }
+
+    fn parseFor(self: *Parser) Error!For {
+        const keyword = self.peek();
+        _ = try self.expectKeyword("for");
+        const name = try self.expectKind(.ident);
+        _ = try self.expectKind(.equals);
+        const start = try self.expectKind(.number);
+        _ = try self.expectKind(.comma);
+        const end = try self.expectKind(.number);
+        if (start.value != 1) {
+            self.note(start.line, "for 1,N");
+            return error.InvalidLoopBound;
+        }
+        if (end.value == 0 or end.value > max_loop_count) {
+            self.note(end.line, "loop bound");
+            return error.InvalidLoopBound;
+        }
+        try self.expectKeyword("do");
+        const body = try self.parseBlockBody();
+        _ = try self.expectKeyword("end");
+        return .{ .var_name = name.text, .count = end.value, .body = body, .line = keyword.line };
     }
 
     fn parseStep(self: *Parser) Error!Step {
@@ -783,6 +1039,9 @@ fn validateScript(parser: *Parser, script: *Script) Error!void {
 
     for (script.caps) |cap| try validateCapOptions(parser, cap);
 
+    var exported: std.ArrayList([]const u8) = .empty;
+    defer exported.deinit(parser.allocator);
+
     for (script.steps, 0..) |step, index| {
         for (script.steps[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, step.name)) {
@@ -790,15 +1049,46 @@ fn validateScript(parser: *Parser, script: *Script) Error!void {
                 return error.InvalidScriptName;
             }
         }
-        try validateStep(parser, script, step);
+        try validateStep(parser, script, step, &exported);
     }
 }
 
-fn validateStep(parser: *Parser, script: *const Script, step: Step) Error!void {
-    var assigned: std.ArrayList([]const u8) = .empty;
-    defer assigned.deinit(parser.allocator);
+fn nameIn(names: []const []const u8, name: []const u8) bool {
+    for (names) |item| if (std.mem.eql(u8, item, name)) return true;
+    return false;
+}
 
-    for (step.body) |statement| {
+fn declareName(allocator: Allocator, list: *std.ArrayList([]const u8), name: []const u8) Error!void {
+    if (!nameIn(list.items, name)) list.append(allocator, name) catch return error.TooManyItems;
+}
+
+fn validateStep(
+    parser: *Parser,
+    script: *const Script,
+    step: Step,
+    exported: *std.ArrayList([]const u8),
+) Error!void {
+    // visible = everything readable (exported names + locals of this scope)
+    var visible: std.ArrayList([]const u8) = .empty;
+    defer visible.deinit(parser.allocator);
+    visible.appendSlice(parser.allocator, exported.items) catch return error.TooManyItems;
+
+    var local: std.ArrayList([]const u8) = .empty;
+    defer local.deinit(parser.allocator);
+
+    try validateStmts(parser, script, step.body, &visible, &local, exported, true);
+}
+
+fn validateStmts(
+    parser: *Parser,
+    script: *const Script,
+    statements: []Stmt,
+    visible: *std.ArrayList([]const u8),
+    local: *std.ArrayList([]const u8),
+    exported: *std.ArrayList([]const u8),
+    is_step_top: bool,
+) Error!void {
+    for (statements) |statement| {
         switch (statement) {
             .call => |call| try validateCall(parser, script, call),
             .assign => |assign| {
@@ -806,17 +1096,55 @@ fn validateStep(parser: *Parser, script: *const Script, step: Step) Error!void {
                     parser.note(assign.line, "variable name clashes with cap");
                     return error.DuplicateVariable;
                 }
-                for (assigned.items) |name| {
-                    if (std.mem.eql(u8, name, assign.name)) {
-                        parser.note(assign.line, "variable");
-                        return error.DuplicateVariable;
-                    }
+                if (nameIn(local.items, assign.name)) {
+                    parser.note(assign.line, "variable");
+                    return error.DuplicateVariable;
                 }
-                assigned.append(parser.allocator, assign.name) catch return error.TooManyItems;
+                try declareName(parser.allocator, local, assign.name);
+                try declareName(parser.allocator, visible, assign.name);
                 try validateCall(parser, script, assign.call);
             },
             .emit => |emit| try validateEmit(parser, emit),
             .stop => {},
+            .out => |out| {
+                if (!nameIn(visible.items, out.name)) {
+                    parser.note(out.line, "out variable must be assigned first");
+                    return error.UnknownVariable;
+                }
+                if (is_step_top) try declareName(parser.allocator, exported, out.name);
+            },
+            .if_stmt => |branch| {
+                try validateCond(parser, branch.cond, visible.items);
+                const mark = visible.items.len;
+                try validateStmts(parser, script, branch.then_body, visible, local, exported, false);
+                visible.shrinkRetainingCapacity(mark);
+                try validateStmts(parser, script, branch.else_body, visible, local, exported, false);
+                visible.shrinkRetainingCapacity(mark);
+            },
+            .for_stmt => |loop| {
+                const mark = visible.items.len;
+                try declareName(parser.allocator, visible, loop.var_name);
+                try validateStmts(parser, script, loop.body, visible, local, exported, false);
+                visible.shrinkRetainingCapacity(mark);
+            },
+        }
+    }
+}
+
+fn validateCond(parser: *Parser, cond: Cond, visible: []const []const u8) Error!void {
+    for (cond.comparisons) |comparison| {
+        if (comparison.left.len == 0 or !nameIn(visible, comparison.left[0])) {
+            parser.note(comparison.line, "condition references an unknown variable");
+            return error.UnknownVariable;
+        }
+        switch (comparison.right) {
+            .path => |path| {
+                if (path.len > 0 and !nameIn(visible, path[0])) {
+                    parser.note(comparison.line, "condition references an unknown variable");
+                    return error.UnknownVariable;
+                }
+            },
+            else => {},
         }
     }
 }

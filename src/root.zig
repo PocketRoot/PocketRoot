@@ -18,6 +18,7 @@ pub const formats = struct {
     pub const dhcpv6 = @import("formats/dhcpv6.zig");
     pub const dns = @import("formats/dns.zig");
     pub const flipper_format = @import("formats/flipper_format.zig");
+    pub const thumb = @import("formats/thumb.zig");
     pub const nbns = @import("formats/nbns.zig");
     pub const ssdp = @import("formats/ssdp.zig");
     pub const tls_certificate = @import("formats/tls_certificate.zig");
@@ -140,6 +141,7 @@ test {
         formats.dhcpv6,
         formats.dns,
         formats.flipper_format,
+        formats.thumb,
         formats.nbns,
         formats.ssdp,
         formats.tls_certificate,

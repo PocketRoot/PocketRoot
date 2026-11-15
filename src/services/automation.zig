@@ -18,6 +18,16 @@ pub const Emitted = struct {
     payload: []const u8,
 };
 
+pub const CompareOp = enum { eq, neq, lt, lte, gt, gte };
+
+/// A condition the script layer asks the engine to evaluate against its variable store.
+pub const ConditionSpec = struct {
+    id: []const u8,
+    variable: []const u8,
+    op: CompareOp,
+    literal: []const u8,
+};
+
 pub const ActionSpec = struct {
     id: []const u8,
     subject: []const u8,
@@ -27,6 +37,11 @@ pub const ActionSpec = struct {
     payload: []const u8 = "",
     active_authorized: bool = false,
     emit: ?Emit = null,
+    /// Binds this action's result payload (key=value lines) to a script variable.
+    bind: ?[]const u8 = null,
+    /// Literal variable binding; used by unrolled loop counters. Never reaches the
+    /// capability service.
+    set_value: ?[]const u8 = null,
 };
 
 /// Two-phase initialization keeps workflow callbacks bound to this engine.
@@ -37,6 +52,8 @@ pub const Engine = struct {
     next_request_id: u64 = 1,
     last_status: ?capability.Status = null,
     emitted: std.ArrayList(Emitted) = .empty,
+    conditions: []const ConditionSpec = &.{},
+    variables: std.StringHashMap([]const u8),
 
     pub fn init(
         self: *Engine,
@@ -53,11 +70,63 @@ pub const Engine = struct {
         self.next_request_id = 1;
         self.last_status = null;
         self.emitted = .empty;
+        self.conditions = &.{};
+        self.variables = std.StringHashMap([]const u8).init(self.capabilities.allocator);
     }
 
     pub fn deinit(self: *Engine) void {
+        var iterator = self.variables.iterator();
+        while (iterator.next()) |entry| {
+            self.capabilities.allocator.free(entry.key_ptr.*);
+            self.capabilities.allocator.free(entry.value_ptr.*);
+        }
+        self.variables.deinit();
         self.emitted.deinit(self.capabilities.allocator);
         self.* = undefined;
+    }
+
+    pub fn setConditions(self: *Engine, conditions: []const ConditionSpec) void {
+        self.conditions = conditions;
+    }
+
+    pub fn variableValue(self: *const Engine, name: []const u8) ?[]const u8 {
+        return self.variables.get(name);
+    }
+
+    fn storeVariable(self: *Engine, name: []const u8, value: []const u8) !void {
+        const allocator = self.capabilities.allocator;
+        if (self.variables.fetchRemove(name)) |old| {
+            allocator.free(old.key);
+            allocator.free(old.value);
+        }
+        const owned_key = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_key);
+        const owned_value = try allocator.dupe(u8, value);
+        errdefer allocator.free(owned_value);
+        try self.variables.put(owned_key, owned_value);
+    }
+
+    /// Result payloads are treated as key=value lines; both the whole payload and
+    /// every field are exposed as script variables (name and name.field).
+    fn bindResult(self: *Engine, name: []const u8, data: []const u8) !void {
+        const allocator = self.capabilities.allocator;
+        try self.storeVariable(name, data);
+        var lines = std.mem.splitScalar(u8, data, 0x0a);
+        while (lines.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r");
+            const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            const key = std.mem.trim(u8, line[0..separator], " \t");
+            const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
+            if (key.len == 0) continue;
+            const full_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ name, key });
+            defer allocator.free(full_key);
+            try self.storeVariable(full_key, value);
+        }
+    }
+
+    fn findCondition(self: *const Engine, id: []const u8) ?ConditionSpec {
+        for (self.conditions) |spec| if (std.mem.eql(u8, spec.id, id)) return spec;
+        return null;
     }
 
     pub fn tick(self: *Engine, definition: workflow.Definition, now_ms: u64) !workflow.Status {
@@ -76,6 +145,11 @@ pub const Engine = struct {
     fn executeAction(context: *anyopaque, action_id: []const u8, _: u16) !workflow.ActionState {
         const self: *Engine = @ptrCast(@alignCast(context));
         const spec = self.findAction(action_id) orelse return error.UnknownAction;
+        if (spec.set_value) |value| {
+            try self.storeVariable(spec.bind orelse action_id, value);
+            self.last_status = .succeeded;
+            return .succeeded;
+        }
         if (spec.emit) |emit| {
             try self.emitted.append(self.capabilities.allocator, .{
                 .severity = emit.severity,
@@ -105,6 +179,9 @@ pub const Engine = struct {
             return .failed;
         };
         defer result.deinit();
+        if (result.status == .succeeded) {
+            if (spec.bind) |name| try self.bindResult(name, result.data);
+        }
         self.last_status = result.status;
         return switch (result.status) {
             .succeeded => .succeeded,
@@ -120,7 +197,26 @@ pub const Engine = struct {
         if (std.mem.eql(u8, condition_id, "last_supported")) {
             return self.last_status != null and self.last_status != .unsupported;
         }
-        return error.UnknownCondition;
+        const spec = self.findCondition(condition_id) orelse return error.UnknownCondition;
+        const actual = self.variables.get(spec.variable) orelse "";
+        return compareValues(actual, spec.op, spec.literal);
+    }
+
+    fn compareValues(actual: []const u8, op: CompareOp, literal: []const u8) bool {
+        switch (op) {
+            .eq => return std.mem.eql(u8, actual, literal),
+            .neq => return !std.mem.eql(u8, actual, literal),
+            else => {},
+        }
+        const left = std.fmt.parseFloat(f64, actual) catch return false;
+        const right = std.fmt.parseFloat(f64, literal) catch return false;
+        return switch (op) {
+            .lt => left < right,
+            .lte => left <= right,
+            .gt => left > right,
+            .gte => left >= right,
+            else => false,
+        };
     }
 
     fn findAction(self: *const Engine, id: []const u8) ?ActionSpec {

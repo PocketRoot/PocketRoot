@@ -64,8 +64,17 @@ pub const Runtime = struct {
     }
 
     pub fn analyzeProtocolPath(self: *Runtime, protocol_id: ?[]const u8, path: []const u8) !protocol_workbench.Analysis {
+        return self.analyzeProtocolPathWith(protocol_id, path, .{});
+    }
+
+    pub fn analyzeProtocolPathWith(
+        self: *Runtime,
+        protocol_id: ?[]const u8,
+        path: []const u8,
+        options: protocol.AnalyzeOptions,
+    ) !protocol_workbench.Analysis {
         var analyzer = self.workbench();
-        var analysis = try analyzer.analyzePath(protocol_id, path);
+        var analysis = try analyzer.analyzePathWith(protocol_id, path, options);
         errdefer analysis.deinit();
 
         try self.events.publish(.{
