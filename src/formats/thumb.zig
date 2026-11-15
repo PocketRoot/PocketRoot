@@ -24,12 +24,23 @@ pub const Sample = struct {
     }
 };
 
-pub const RefKind = enum { direct, pair };
+pub const RefKind = enum {
+    /// ADR: the register receives the address itself.
+    direct,
+    /// MOVW/MOVT pair building a 32-bit address.
+    pair,
+    /// LDR (literal): the register receives the word stored at the literal slot.
+    literal_load,
+};
 
 pub const LiteralRef = struct {
+    /// Address the instruction forms (ADR/pair) or the literal-slot address (LDR).
     address: u32,
     instruction: u32,
     kind: RefKind = .direct,
+    /// For a literal load, the pointer word read from the slot when it lies inside the
+    /// image. This is what a "string pointer table" entry actually references.
+    pointer: ?u32 = null,
 };
 
 pub const Listing = struct {
@@ -416,6 +427,15 @@ fn inImage(address: u32, base: u32, length: usize) bool {
     return @as(u64, address) >= start and @as(u64, address) < end;
 }
 
+/// Reads the pointer stored in a literal slot. Null when the slot is outside the image
+/// or the word would cross its end, so a false reference is never invented.
+fn readPointer(data: []const u8, base: u32, slot: u32) ?u32 {
+    if (!inImage(slot, base, data.len)) return null;
+    const offset: usize = slot - base;
+    if (data.len - offset < 4) return null;
+    return std.mem.readInt(u32, data[offset..][0..4], .little);
+}
+
 /// Decodes the image from base_address, collecting coverage statistics, call targets
 /// and vector-table entries as candidate function starts.
 pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_offset: usize) !Listing {
@@ -445,7 +465,12 @@ pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_o
 
         if (decoded.literal) |target| {
             if (literals.items.len < max_targets) {
-                literals.append(allocator, .{ .address = target, .instruction = address }) catch {};
+                var reference = LiteralRef{ .address = target, .instruction = address };
+                if (std.mem.eql(u8, decoded.mnemonic, "ldr")) {
+                    reference.kind = .literal_load;
+                    reference.pointer = readPointer(data, base_address, target);
+                }
+                literals.append(allocator, reference) catch {};
             }
         }
         if (decoded.mov) |mov| {
@@ -461,6 +486,7 @@ pub fn decode(allocator: Allocator, data: []const u8, base_address: u32, start_o
                                 .address = target,
                                 .instruction = low.instruction,
                                 .kind = .pair,
+                                .pointer = target,
                             }) catch {};
                         }
                     }
@@ -611,4 +637,36 @@ test "a movt without a matching movw produces no reference" {
     var listing = try decode(std.testing.allocator, &image, 0x0800_0000, 0);
     defer listing.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), listing.literals.len);
+}
+
+test "a literal load dereferences its slot" {
+    var image = [_]u8{0} ** 32;
+    // 0x08000000: ldr r0, [pc, #0] -> slot 0x08000004
+    image[0] = 0x00;
+    image[1] = 0x48;
+    // 0x08000002: bx lr
+    image[2] = 0x70;
+    image[3] = 0x47;
+    std.mem.writeInt(u32, image[4..8], 0x0800_0010, .little);
+
+    var listing = try decode(std.testing.allocator, &image, 0x0800_0000, 0);
+    defer listing.deinit(std.testing.allocator);
+
+    try std.testing.expect(listing.literals.len >= 1);
+    try std.testing.expectEqual(RefKind.literal_load, listing.literals[0].kind);
+    try std.testing.expectEqual(@as(u32, 0x0800_0004), listing.literals[0].address);
+    try std.testing.expectEqual(@as(?u32, 0x0800_0010), listing.literals[0].pointer);
+}
+
+test "a literal slot outside the image has no pointer" {
+    // Six bytes: the slot at offset 4 exists but a whole pointer word does not, so the
+    // decoder must not read past the image or invent a value.
+    var image = [_]u8{0} ** 6;
+    image[0] = 0x00;
+    image[1] = 0x48;
+    var listing = try decode(std.testing.allocator, &image, 0x2000_0000, 0);
+    defer listing.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), listing.literals.len);
+    try std.testing.expectEqual(RefKind.literal_load, listing.literals[0].kind);
+    try std.testing.expect(listing.literals[0].pointer == null);
 }

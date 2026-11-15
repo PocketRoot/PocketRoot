@@ -45,7 +45,7 @@ the length walk completed; it does not mean every mnemonic is modelled. Coverage
 | `instructions`, `unknown_opcodes`, `decode_coverage_x100` | Decode volume and quality |
 | `functions`, `function_1`..`function_3` | Detected function starts |
 | `insn_1`..`insn_4` | `0xADDRESS: mnemonic operands` samples from the first decoded instruction onward |
-| `literal_refs`, `strings_referenced`, `xref_1`..`xref_4` | Literal-pool cross references |
+| `literal_refs`, `strings_referenced`, `pointer_refs`, `xref_1`..`xref_4` | Literal references, referenced strings, and how many of those went through a pointer word |
 
 Findings follow the shared conventions: `info` states an observation (high-entropy
 region), `warning` states suspicion (a raw image without a valid vector table, decode
@@ -54,15 +54,28 @@ not a security rating.
 
 ## 4. Literal-pool cross references
 
-ARM compilers place string addresses in a literal pool and load them with
-`LDR Rt, [pc, #imm]`. The decoder already computes `(pc + 4) & ~3 + imm`, so comparing
-that target with the address of a scanned string establishes a reference.
+ARM compilers load data addresses in two shapes, and the decoder follows both:
+
+| Shape | Instruction | What is recorded |
+|---|---|---|
+| Address formed directly | `ADR`, `MOVW`+`MOVT` | the address itself |
+| Address in a literal slot | `LDR Rt, [pc, #imm]` | the slot address and the pointer word read from it |
+
+The second shape is the usual "string pointer table": the PC-relative load reads a word
+that points at the string. Comparing only the slot address with the string address would
+miss it, so the decoder dereferences the slot when the word lies inside the image and
+counts those hits as `pointer_refs`. A slot outside the image, or one whose word would
+cross the image end, yields no pointer (null) rather than a guess.
 
 ```
 analyze --protocol firmware --base 0x08000000 --arch thumb f3-demo.bin
-  literal_refs: 1     strings_referenced: 1
-  xref_1: "PocketRoot-F3" <- 0x08000008 in 0x08000008
+  literal_refs: 2     strings_referenced: 2     pointer_refs: 1
+  xref_1: "PocketRoot-F3" <- 0x08000100 slot 0x08000104 -> 0x08000120 in 0x08000100 [literal-load]
+  xref_2: "DirectRef" <- 0x08000008 in 0x08000008
 ```
+
+The `[literal-load]` marker means the string was reached through the pointer word; the
+line names the loading instruction, the slot, the pointer and the containing function.
 
 ### MOVW/MOVT pairs
 

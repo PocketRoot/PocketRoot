@@ -227,12 +227,15 @@ pub fn analyzeWith(
         decoded = true;
     }
 
-    // Stage F3: literal-pool cross references. Each printable string is compared with
-    // the pc-relative data loads found while decoding; every hit names the loading
-    // instruction and the function that contains it.
+    // Stage F3: literal-pool cross references. A string is referenced when a decoded
+    // instruction forms its address (ADR / MOVW+MOVT) or when it loads a pointer word
+    // that holds the address: the second form is the "string pointer table" layout
+    // compilers emit for LDR Rt, [pc, #imm]. Every hit names the loading instruction,
+    // the literal slot, the pointer value and the containing function.
     var xref_count: usize = 0;
     var referenced_strings: usize = 0;
-    var xref_buffers: [max_xref_lines][96]u8 = undefined;
+    var pointer_refs: usize = 0;
+    var xref_buffers: [max_xref_lines][128]u8 = undefined;
     var xref_lengths: [max_xref_lines]usize = @splat(0);
     if (decoded and listing.literals.len > 0) {
         var ref_index: usize = 0;
@@ -240,18 +243,32 @@ pub fn analyzeWith(
             const ref = string_refs[ref_index];
             const address = options.base_address + @as(u32, @intCast(ref.offset));
             for (listing.literals) |literal| {
-                if (literal.address != address) continue;
+                const direct = literal.address == address;
+                const via_pointer = literal.pointer != null and literal.pointer.? == address;
+                if (!direct and !via_pointer) continue;
                 referenced_strings += 1;
+                if (via_pointer and literal.kind == .literal_load) pointer_refs += 1;
                 if (xref_count < max_xref_lines) {
                     const clipped = @min(ref.length, max_string_bytes);
                     const text = data[ref.offset .. ref.offset + clipped];
                     const owner = containingFunction(listing.entries, literal.instruction);
-                    const technique = if (literal.kind == .pair) " [movw/movt]" else "";
-                    const line = std.fmt.bufPrint(
-                        &xref_buffers[xref_count],
-                        "\"{s}\" <- 0x{x:0>8} in 0x{x:0>8}{s}",
-                        .{ text, literal.instruction, owner, technique },
-                    ) catch "";
+                    const technique = switch (literal.kind) {
+                        .pair => " [movw/movt]",
+                        .literal_load => " [literal-load]",
+                        .direct => "",
+                    };
+                    const line = if (via_pointer and literal.kind == .literal_load)
+                        std.fmt.bufPrint(
+                            &xref_buffers[xref_count],
+                            "\"{s}\" <- 0x{x:0>8} slot 0x{x:0>8} -> 0x{x:0>8} in 0x{x:0>8}{s}",
+                            .{ text, literal.instruction, literal.address, literal.pointer.?, owner, technique },
+                        ) catch ""
+                    else
+                        std.fmt.bufPrint(
+                            &xref_buffers[xref_count],
+                            "\"{s}\" <- 0x{x:0>8} in 0x{x:0>8}{s}",
+                            .{ text, literal.instruction, owner, technique },
+                        ) catch "";
                     xref_lengths[xref_count] = line.len;
                     xref_count += 1;
                 }
@@ -323,6 +340,7 @@ pub fn analyzeWith(
         try result.addNumberField("functions", listing.functions);
         try result.addNumberField("literal_refs", listing.literals.len);
         try result.addNumberField("strings_referenced", referenced_strings);
+        try result.addNumberField("pointer_refs", pointer_refs);
 
         var xref_index: usize = 0;
         while (xref_index < xref_count) : (xref_index += 1) {
@@ -546,4 +564,30 @@ fn findField(result: *const protocol.AnalysisResult, name: []const u8) ?[]const 
         if (std.mem.eql(u8, field.name, name)) return field.value;
     }
     return null;
+}
+
+test "links a pointer-table literal load to a string" {
+    var image = [_]u8{0} ** 0x140;
+    std.mem.writeInt(u32, image[0..4], 0x2000_1000, .little);
+    std.mem.writeInt(u32, image[4..8], 0x0800_0101, .little);
+    // 0x08000100: ldr r0, [pc, #0] -> literal slot 0x08000104
+    image[0x100] = 0x00;
+    image[0x101] = 0x48;
+    // 0x08000102: bx lr
+    image[0x102] = 0x70;
+    image[0x103] = 0x47;
+    // The slot holds a pointer to the string, the "string pointer table" layout.
+    std.mem.writeInt(u32, image[0x104..0x108], 0x0800_0120, .little);
+    const text = "PointerTable";
+    @memcpy(image[0x120 .. 0x120 + text.len], text);
+
+    var result = try analyzeWith(std.testing.allocator, &image, .{ .base_address = 0x0800_0000 });
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("1", findField(&result, "strings_referenced").?);
+    try std.testing.expectEqualStrings("1", findField(&result, "pointer_refs").?);
+    const xref = findField(&result, "xref_1").?;
+    try std.testing.expect(std.mem.indexOf(u8, xref, "PointerTable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xref, "literal-load") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xref, "0x08000120") != null);
 }

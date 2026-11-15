@@ -40,7 +40,7 @@ passed to `parseHexBytes` to be exactly two hexadecimal digits.
 | `nmap` | Hand-written XML parser: single `nmaprun` root, tag pairing, attribute validation; extracts host/status/address/hostname/port/state/service/script | open port: `info`; script: `info` |
 | `nuclei` | One JSON object per line; requires `template-id` (or `templateID`), `info.name`, `info.severity`; target taken from `matched-at`, then `host`, then `ip` | malformed line: `warning` and parsing continues; otherwise the record's severity |
 | `pcap` | See section 3 | open ports, cleartext HTTP, TLS and similar: findings |
-| `firmware` | Container detection (ELF magic, Intel HEX, raw); 1024-byte block entropy scaled by 100; ASCII and UTF-16LE string scan (4+ characters, 8 previews); Cortex-M vector table heuristic; Thumb disassembly from the reset handler reporting `instructions`, `unknown_opcodes`, `decode_coverage_x100`, `functions` and four instruction samples; literal-pool cross references as `literal_refs`, `strings_referenced`, `xref_N` | high-entropy region: `info`; raw image without a valid vector table: `warning`; decode coverage below 95%: `warning` |
+| `firmware` | Container detection (ELF magic, Intel HEX, raw); 1024-byte block entropy scaled by 100; ASCII and UTF-16LE string scan (4+ characters, 8 previews); Cortex-M vector table heuristic; Thumb disassembly from the reset handler reporting `instructions`, `unknown_opcodes`, `decode_coverage_x100`, `functions` and four instruction samples; literal-pool cross references as `literal_refs`, `strings_referenced`, `pointer_refs`, `xref_N` (including pointer words read from LDR literal slots) | high-entropy region: `info`; raw image without a valid vector table: `warning`; decode coverage below 95%: `warning` |
 
 The `ibutton` CRC-8 is implemented in this repository (`maximCrc8`, reflected
 polynomial 0x8C) with a test vector `01 23 45 67 89 AB CD` -> `E9`.
@@ -102,5 +102,6 @@ asserts a round trip for every plugin that provides a sample.
   yields the unique and duplicate counts in the report.
 - `--json` emits `pocketroot.project.v1`.
 
-`project samples` reports five unique artifacts and three skipped files, which matches
-the three manual protocols in the sample tree.
+`project samples` reports unique and skipped totals at run time: a skipped file has no
+extension match, or its protocol is manual and was not named with `--protocol`. The counts
+follow the sample tree instead of a constant.
