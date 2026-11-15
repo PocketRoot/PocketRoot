@@ -17,6 +17,17 @@ pub const Kind = enum {
     network,
     storage,
     system,
+    // Reverse-engineering surface (appended so existing values stay stable).
+    // usb_host is deliberately distinct from usb: usb means "we enumerate as a
+    // device" (BadUSB), usb_host means "we enumerate the target".
+    uart,
+    spi,
+    i2c,
+    jtag,
+    swd,
+    logic,
+    power,
+    usb_host,
 };
 
 pub const Operation = enum {

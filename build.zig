@@ -58,13 +58,19 @@ pub fn build(b: *std.Build) void {
         "nuclei",
         "samples/network/nuclei-demo.jsonl",
     });
-    addSmoke(smoke_step, exe, &.{
-        "vulns",
-        "../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl",
-        "--protocol",
-        "nmap",
-        "samples/network/nmap-demo.xml",
-    });
+    // Cross-repo fixture: keep the engine repo independently checkable.
+    const vulndb_catalog = "../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl";
+    const vulndb_absolute = b.pathFromRoot(vulndb_catalog);
+    const vulndb_present = if (std.Io.Dir.accessAbsolute(b.graph.io, vulndb_absolute, .{})) |_| true else |_| false;
+    if (vulndb_present) {
+        addSmoke(smoke_step, exe, &.{
+            "vulns",
+            vulndb_catalog,
+            "--protocol",
+            "nmap",
+            "samples/network/nmap-demo.xml",
+        });
+    }
 
     const check_step = b.step("check", "Run formatting, tests, and offline smoke checks");
     check_step.dependOn(&fmt_check.step);
