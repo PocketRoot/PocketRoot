@@ -58,14 +58,23 @@ pub fn build(b: *std.Build) void {
         "nuclei",
         "samples/network/nuclei-demo.jsonl",
     });
-    // Cross-repo fixture: keep the engine repo independently checkable.
-    const vulndb_catalog = "../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl";
-    const vulndb_absolute = b.pathFromRoot(vulndb_catalog);
-    const vulndb_present = if (std.Io.Dir.accessAbsolute(b.graph.io, vulndb_absolute, .{})) |_| true else |_| false;
-    if (vulndb_present) {
+    // Cross-repo fixture: accept a sibling checkout or one inside the workspace, and
+    // keep the engine repo independently checkable when neither is present.
+    const vulndb_candidates = [_][]const u8{
+        "../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl",
+        "PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl",
+    };
+    var vulndb_catalog: ?[]const u8 = null;
+    for (vulndb_candidates) |candidate| {
+        if (std.Io.Dir.accessAbsolute(b.graph.io, b.pathFromRoot(candidate), .{})) |_| {
+            vulndb_catalog = candidate;
+            break;
+        } else |_| {}
+    }
+    if (vulndb_catalog) |catalog| {
         addSmoke(smoke_step, exe, &.{
             "vulns",
-            vulndb_catalog,
+            catalog,
             "--protocol",
             "nmap",
             "samples/network/nmap-demo.xml",

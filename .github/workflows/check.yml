@@ -8,20 +8,14 @@ jobs:
   check:
     # The engine's network services are Windows-first, so match the dev host.
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: engine
     steps:
       - name: Checkout engine
         uses: actions/checkout@v4
-        with:
-          path: engine
 
-      # Optional sibling repo. It is a *separate private* repo, so the default
-      # GITHUB_TOKEN cannot read it: provide a VULNDB_TOKEN secret (fine-grained
-      # PAT with Contents: read) to enable the catalog tests. Without it the
-      # checkout fails, the tests skip (error.SkipZigTest) and build.zig omits the
-      # vulns smoke step - the engine repo stays independently checkable.
+      # Optional catalog fixture (a separate private repo). Provide a VULNDB_TOKEN
+      # secret (fine-grained PAT, Contents: read) to run the catalog tests; without
+      # it the checkout fails, those tests return error.SkipZigTest and build.zig
+      # omits the vulns smoke step.
       - name: Checkout vulnerability db (optional)
         continue-on-error: true
         uses: actions/checkout@v4
