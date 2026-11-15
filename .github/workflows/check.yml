@@ -1,0 +1,42 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    # The engine's network services are Windows-first, so match the dev host.
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@v4
+        with:
+          path: engine
+
+      # Optional sibling repo. When unavailable, the catalog tests skip
+      # (error.SkipZigTest) and build.zig omits the vulns smoke step, so the
+      # engine repo stays independently checkable.
+      - name: Checkout vulnerability db (optional)
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/PocketRootVulnerabilityDb
+          path: PocketRootVulnerabilityDb
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Format check
+        run: zig fmt --check build.zig build.zig.zon src
+
+      - name: Tests
+        run: zig build test --summary all
+
+      - name: Smoke
+        run: zig build smoke --summary all
