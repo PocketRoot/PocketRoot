@@ -41,3 +41,9 @@ jobs:
 
       - name: Smoke
         run: zig build smoke --summary all
+
+      # The catalogue is a separate repository; validate the v2 export when present.
+      - name: Validate catalogue v2
+        if: hashFiles('PocketRootVulnerabilityDb/vulndb/catalog-v2.jsonl') != ''
+        shell: pwsh
+        run: ./PocketRootVulnerabilityDb/tools/Validate-CatalogV2.ps1

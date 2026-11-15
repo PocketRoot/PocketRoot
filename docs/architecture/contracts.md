@@ -153,7 +153,8 @@ A response payload starts with the `capability.Status` byte followed by the data
 
 | Schema | Location | Purpose |
 |---|---|---|
-| `pocketroot.vulnerability.v1` | `services/vulnerability_catalog.zig` | One catalogue line |
+| `pocketroot.vulnerability.v2` | `services/vulnerability_catalog.zig` | One catalogue line (vendors, aliases, CVSS, references, inclusive ranges) |
+| `pocketroot.vulnerability.v1` | `services/vulnerability_catalog.zig` | Legacy catalogue line, still accepted |
 | `pocketroot.vulnerability.provenance.v1` | validated by the catalogue repository script | Provenance pointer |
 | `pocketroot.project.v1` | CLI JSON output | Project report |
 | `pocketroot.library.v1` | `services/library.zig` | Saved library entries |

@@ -53,8 +53,14 @@ verified on its own.
 
 ## 4. Catalogue validation
 
-The catalogue repository ships `Validate.ps1`: PowerShell 5.1, no dependencies, offline
-and fail-closed. It never runs Docker and never executes a proof of concept.
+The catalogue repository ships two validators. `tools/Validate-CatalogV2.ps1` checks the
+v2 export used by `vulns`: schema, identifier uniqueness, affected products, alias and
+version-rule limits, dotted version syntax, range shape, severity values, CVSS bounds and
+the SHA-256 of every line against its provenance record. The CI workflow runs it when the
+catalogue checkout is present.
+
+`Validate.ps1` covers the original v1 catalogue: PowerShell 5.1, no dependencies,
+offline and fail-closed. It never runs Docker and never executes a proof of concept.
 
 | Section | Validated |
 |---|---|

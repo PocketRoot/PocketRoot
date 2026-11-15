@@ -13,7 +13,7 @@ The I/O column states where the work actually happens.
 | `archive [root]` | any | filesystem | `services/archive.zig` | 512 entries | `TooManyArchiveEntries` |
 | `analyze` / `report` | any | filesystem | `ProtocolWorkbench` | file <= 64 MiB | `UnknownProtocol` and friends |
 | `project [--json]` | any | filesystem | `services/project.zig` | 256 analyses, 256 issues | `TooManyProjectAnalyses` |
-| `vulns <catalog>` | any | filesystem | `vulnerability_matcher` | catalogue 16 MiB, 4096 CVEs | version mismatch: `UnsupportedCatalogSchema` |
+| `vulns <catalog>` | any | filesystem | `vulnerability_matcher` | catalogue 64 MiB, 65536 entries | version mismatch: `UnsupportedCatalogSchema` |
 | `migrate` | any | filesystem | `validatedCopy` | same as analyze | rejects identical input and output paths |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |

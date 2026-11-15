@@ -31,6 +31,8 @@ const PortProbe = struct {
     confirmed: bool = false,
     version: [96]u8 = undefined,
     version_len: usize = 0,
+    product: [64]u8 = undefined,
+    product_len: usize = 0,
     evidence: [160]u8 = undefined,
     evidence_len: usize = 0,
     identification_error: bool = false,
@@ -41,6 +43,10 @@ const PortProbe = struct {
 
     fn evidenceText(self: *const PortProbe) []const u8 {
         return self.evidence[0..self.evidence_len];
+    }
+
+    fn productText(self: *const PortProbe) []const u8 {
+        return self.product[0..self.product_len];
     }
 };
 
@@ -130,6 +136,10 @@ pub fn scan(
                     const version_key = try std.fmt.bufPrint(&key_buffer, "open_port_{d}_version", .{open_count});
                     try result.addField(version_key, probe.versionText());
                 }
+                if (probe.product_len != 0) {
+                    const product_key = try std.fmt.bufPrint(&key_buffer, "open_port_{d}_product", .{open_count});
+                    try result.addField(product_key, probe.productText());
+                }
                 _ = try result.addNetworkObservation(.{
                     .kind = .endpoint,
                     .confidence = .confirmed,
@@ -147,6 +157,7 @@ pub fn scan(
                         .transport = "tcp",
                         .port = port,
                         .service = probe.service,
+                        .product = probe.productText(),
                         .version = probe.versionText(),
                         .evidence = probe.evidenceText(),
                         .source_id = "tcp-scan:service",
@@ -307,12 +318,14 @@ fn applyProtocolEvidence(port: u16, response: []const u8, source: []const u8, pr
     if (std.mem.startsWith(u8, response, "RFB ")) return confirmVnc(probe, source, response);
     if (std.mem.startsWith(u8, response, "+PONG") or std.mem.startsWith(u8, response, "-NOAUTH")) {
         confirmService(probe, "redis", source);
+        setProduct(probe, "Redis");
         probe.evidence_len = copySafeLine(&probe.evidence, response);
         return;
     }
     if (std.mem.startsWith(u8, response, "$") or std.mem.startsWith(u8, response, "# Server")) {
         if (findLineValue(response, "redis_version:")) |version| {
             confirmService(probe, "redis", source);
+            setProduct(probe, "Redis");
             setVersion(probe, firstToken(version));
             setEvidence(probe, "Redis INFO server version {s}", .{probe.versionText()});
             return;
@@ -321,6 +334,7 @@ fn applyProtocolEvidence(port: u16, response: []const u8, source: []const u8, pr
     if (port == 5432 and response.len == 1 and (response[0] == 'S' or response[0] == 'N')) {
         probe.service = "postgresql";
         probe.service_source = source;
+        setProduct(probe, "PostgreSQL");
         probe.confirmed = true;
         const evidence = if (response[0] == 'S') "PostgreSQL SSLRequest: supported" else "PostgreSQL SSLRequest: unsupported";
         @memcpy(probe.evidence[0..evidence.len], evidence);
@@ -329,6 +343,7 @@ fn applyProtocolEvidence(port: u16, response: []const u8, source: []const u8, pr
     }
     if (parseMysqlGreeting(response)) |version| {
         confirmService(probe, "mysql", source);
+        setProduct(probe, "MySQL");
         setVersion(probe, version);
         setEvidence(probe, "MySQL protocol 10; server version {s}", .{probe.versionText()});
         return;
@@ -354,6 +369,50 @@ fn applyProtocolEvidence(port: u16, response: []const u8, source: []const u8, pr
     }
 }
 
+fn setProduct(probe: *PortProbe, product: []const u8) void {
+    const clipped = @min(product.len, probe.product.len);
+    @memcpy(probe.product[0..clipped], product[0..clipped]);
+    probe.product_len = clipped;
+}
+
+/// Software strings look like "OpenSSH_9.6p1", "dropbear_2022.83" or "nginx/1.25.3".
+/// The product name is the prefix before the separator or the first digit.
+fn productFromSoftware(software: []const u8) []const u8 {
+    if (software.len == 0) return "unknown";
+    var end: usize = 0;
+    while (end < software.len) : (end += 1) {
+        const byte = software[end];
+        if (byte == '_' or byte == '/' or byte == ' ' or std.ascii.isDigit(byte)) break;
+    }
+    return if (end == 0) "unknown" else software[0..end];
+}
+
+/// Reads the value of a response header from a raw HTTP response head.
+fn findHeaderValue(response: []const u8, name: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, response, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len < name.len + 1) continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..name.len], name)) continue;
+        if (line[name.len] != ':') continue;
+        const value = std.mem.trim(u8, line[name.len + 1 ..], " \t");
+        if (value.len == 0) return null;
+        return value;
+    }
+    return null;
+}
+
+const banner_products = [_][]const u8{
+    "ProFTPD", "vsftpd", "Pure-FTPd", "Postfix", "Exim", "Sendmail", "Dovecot", "Courier", "FileZilla",
+};
+
+fn productFromBanner(line: []const u8) ?[]const u8 {
+    for (banner_products) |candidate| {
+        if (std.ascii.indexOfIgnoreCase(line, candidate) != null) return candidate;
+    }
+    return null;
+}
+
 fn confirmService(probe: *PortProbe, service: []const u8, source: []const u8) void {
     probe.service = service;
     probe.service_source = source;
@@ -368,6 +427,7 @@ fn confirmSsh(probe: *PortProbe, source: []const u8, response: []const u8) void 
     if (!validNumericVersion(protocol_version) or software.len == 0) return;
     confirmService(probe, "ssh", source);
     setVersion(probe, software);
+    setProduct(probe, productFromSoftware(software));
     setEvidence(probe, "SSH {s}; software {s}", .{ protocol_version, probe.versionText() });
 }
 
@@ -380,6 +440,9 @@ fn confirmHttp(probe: *PortProbe, source: []const u8, response: []const u8) void
     confirmService(probe, "http", source);
     probe.evidence_len = line_len;
     setVersion(probe, version);
+    if (findHeaderValue(response, "server")) |server| {
+        setProduct(probe, productFromSoftware(server));
+    }
 }
 
 fn confirmVnc(probe: *PortProbe, source: []const u8, response: []const u8) void {
@@ -397,6 +460,7 @@ fn confirmVnc(probe: *PortProbe, source: []const u8, response: []const u8) void 
 
 fn confirmGreeting(probe: *PortProbe, service: []const u8, source: []const u8, label: []const u8, line: []const u8) void {
     confirmService(probe, service, source);
+    if (productFromBanner(line)) |product| setProduct(probe, product);
     probe.version_len = extractVersionPhrase(&probe.version, line);
     if (probe.version_len == 0) {
         setEvidence(probe, "{s} greeting received", .{label});
