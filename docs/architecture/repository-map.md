@@ -31,7 +31,7 @@ On disk the three sit side by side:
 | Location | Coupling | Current behaviour |
 |---|---|---|
 | `build.zig` smoke step | Registers the `vulns` smoke only when the catalogue directory exists | A standalone clone still passes `zig build smoke` |
-| `services/vulnerability_catalog.zig` tests | Reports `SkipZigTest` when the catalogue or its `vulndb/catalog-v1.jsonl` file is missing; asserts the catalogue holds exactly six entries | A standalone clone skips instead of failing; a catalogue size change still fails the test on purpose |
+| `services/vulnerability_catalog.zig` tests | Reports `SkipZigTest` when the catalogue or its `vulndb/catalog-v1.jsonl` file is missing; otherwise every line must parse under the declared schema | A standalone clone skips instead of failing; a malformed entry still fails the test |
 | Catalogue `Validate.ps1` | Compares a Base64-encoded expected message | Any wording change fails validation |
 
 The catalogue is a separate repository because it has its own release cycle, its own

@@ -15,6 +15,10 @@ The I/O column states where the work actually happens.
 | `project [--json]` | any | filesystem | `services/project.zig` | 256 analyses, 256 issues | `TooManyProjectAnalyses` |
 | `vulns <catalog>` | any | filesystem | `vulnerability_matcher` | catalogue 64 MiB, 65536 entries | version mismatch: `UnsupportedCatalogSchema` |
 | `migrate` | any | filesystem | `validatedCopy` | same as analyze | rejects identical input and output paths |
+| `device info` | any | none | `services/device_host.zig` | - | exit 0 |
+| `device request <kind> <op>` | any | simulated | capability kernel + simulated backend | subject <= 128 B, payload <= 1 MiB | denied/failed exits 1 |
+| `device serve` | any | stdin/file -> stdout/file | PKRT frame loop | 4096 frames, replay rejection | malformed frame aborts |
+| `audit [--json] <path>` | any | filesystem | `services/audit_log.zig` | 8 MiB, 4096 lines | invalid line fails closed |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |
 | `capture <s> <out> <comp>` | Windows only | real | `pktmon` start/stop/etl2pcap | 1-60 s, 1-64 MB, output <= 80 MiB | refuses overwrite, validates pcapng header and trailer |
@@ -33,19 +37,21 @@ The commands above are exercised by the smoke checks in `build.zig`.
 |---|---|---|---|
 | Firmware triage | `analyze --protocol firmware <img>` | filesystem | Container detection, block entropy, strings, Cortex-M vector table heuristic |
 | Firmware disassembly | `analyze --protocol firmware --base <hex> --arch thumb <img>` | filesystem | Thumb-16 plus BL/MOVW/MOVT/LDR(pc); function starts from vector table and BL targets; reports coverage and unknown count |
-| Literal-pool cross references | same command; fields `literal_refs`, `strings_referenced`, `xref_N` | filesystem | String to loading instruction to containing function; single-instruction data flow plus movw/movt pairing |
+| Literal-pool cross references | same command; fields `literal_refs`, `strings_referenced`, `pointer_refs`, `xref_N` | filesystem | String to loading instruction to containing function; direct (ADR/MOVW+MOVT) and pointer-table (LDR literal, slot dereferenced) references |
 | Script parsing and validation | library: `PocketRoot.Script` (`services/script.zig`) | none | Lua-style block syntax, named errors, fuzz coverage |
 | Script execution (CLI) | `script run [--lib a.pk,b.pk] [--authorize-active] [--region <id>] <file.pk>` | simulated | Prints status, audit entries and emitted findings; unauthorised active operations exit 1 |
 | Script compilation | library: `PocketRoot.ScriptExecutor` (`services/script_builder.zig`) | simulated | Compiles to `workflow.Definition` with `if/elseif/else`, bounded `for`, `out`, pack gating and sub-script inlining |
 
-## 3. Library modules without a CLI path
+## 3. Library modules and their CLI reachability
 
 | Module | Content | Reachability |
 |---|---|---|
-| `core/capability.zig` | 20 kinds by 9 operations: authorisation, audit, locks, emergency stop | Used by automation and simulator tests; the CLI never imports it |
-| `device/ipc.zig` | PKRT v1 frames, CRC-32, sequence replay rejection | Loopback tests only; no real transport |
-| `device/command.zig` | Capability command wire format | Same as IPC |
-| `simulator/device.zig` | Simulated backend with a support set and a "simulated" result | No real backend |
+| `core/capability.zig` | Capability kinds and operations (counts in [facts](facts.md)): authorisation, audit, locks, emergency stop | `device request\|serve` and `script run` |
+| `device/ipc.zig` | PKRT v1 frames, CRC-32, sequence replay rejection | `device serve` and loopback tests; no hardware transport |
+| `device/command.zig` | Capability command wire format | `device serve` over PKRT frames |
+| `services/device_host.zig` | Policy + backend + audit sink + frame loop | `device request`, `device serve` |
+| `services/audit_log.zig` | `pocketroot.audit.v1` JSONL writer/parser | `device --audit`, `audit` |
+| `simulator/device.zig` | Simulated backend with a support set and a "simulated" result | `device`, `script run`; no real backend |
 | `simulator/loopback.zig` | IPC to kernel to backend to response frame | Tests only |
 | `services/automation.zig` | Workflow to capability adapter | Tests and the script CLI |
 | `services/workflow.zig` | Steps, conditions, retries, checkpoint, cancel | Tests and the script CLI |
@@ -75,6 +81,9 @@ network / capture / neighbor / tcp-scan / discover / scan-cidr / http-inspect / 
 
 capability request -> policy.authorize -> locks -> backend -> audit
         (simulated backend; returns "simulated")
+
+device request/serve -> device_host -> capability kernel -> PKRT response
+        (CLI host entry; optional JSONL audit sink)
 ```
 
 Active device operations (transmit, emulate, card read/write) are not on any code path

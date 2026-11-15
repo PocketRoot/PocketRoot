@@ -11,6 +11,7 @@ what the software does and how to verify it. Every behavioural claim is anchored
 | [architecture/overview](architecture/overview.md) | Layers, data flow, main execution paths, extension points |
 | [architecture/contracts](architecture/contracts.md) | Plugin contract, result model, limits, IPC frame format |
 | [architecture/repository-map](architecture/repository-map.md) | Repository layout, cross-repository coupling, read-only references |
+| [capabilities/facts](capabilities/facts.md) | Generated counts: plugins, kinds, operations, tests, smoke checks, catalogue size |
 | [capabilities/matrix](capabilities/matrix.md) | Capability by capability: real I/O, simulated, or not wired |
 | [capabilities/network](capabilities/network.md) | Network capabilities: implementation, limits, failure semantics |
 | [capabilities/offline-analysis](capabilities/offline-analysis.md) | Offline protocol plugins and analysis depth |

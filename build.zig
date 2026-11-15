@@ -20,6 +20,26 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // Documentation facts are generated from the source tree so counts cannot drift.
+    const facts_exe = b.addExecutable(.{
+        .name = "PocketRootFacts",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/facts.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "PocketRoot", .module = mod }},
+        }),
+    });
+    const facts_write = b.addRunArtifact(facts_exe);
+    facts_write.addArg("--write");
+    const facts_step = b.step("facts", "Regenerate docs/facts.json and docs/capabilities/facts.md");
+    facts_step.dependOn(&facts_write.step);
+
+    const facts_check = b.addRunArtifact(facts_exe);
+    facts_check.addArg("--check");
+    const docs_check_step = b.step("docs-check", "Verify the generated fact sheet is current");
+    docs_check_step.dependOn(&facts_check.step);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
@@ -33,7 +53,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&exe_tests.step);
 
     const fmt_check = b.addFmt(.{
-        .paths = &.{ "build.zig", "build.zig.zon", "src" },
+        .paths = &.{ "build.zig", "build.zig.zon", "src", "tools" },
         .check = true,
     });
     const smoke_step = b.step("smoke", "Run offline CLI smoke checks");
@@ -44,6 +64,28 @@ pub fn build(b: *std.Build) void {
     addSmokeExit(smoke_step, exe, &.{"unknown-command"}, 2);
     addSmoke(smoke_step, exe, &.{ "analyze", "samples/infrared/demo-power.ir" });
     addSmoke(smoke_step, exe, &.{ "analyze", "--json", "samples/infrared/demo-power.ir" });
+    addSmoke(smoke_step, exe, &.{ "script", "run", "samples/scripts/reference-flow.pk" });
+    addSmoke(smoke_step, exe, &.{ "device", "info" });
+    addSmoke(smoke_step, exe, &.{ "device", "request", "infrared", "read", "--payload", "capture" });
+    addSmokeExit(smoke_step, exe, &.{ "device", "request", "subghz", "transmit", "--authorize-active" }, 1);
+    addSmoke(smoke_step, exe, &.{
+        "device",
+        "serve",
+        "--transport",
+        "loopback",
+        "--frames",
+        "samples/device/request-infrared.pkrt",
+        "--output",
+        ".zig-cache/smoke-device.pkrt",
+    });
+    addSmokeStdin(smoke_step, exe, &.{
+        "device",
+        "serve",
+        "--transport",
+        "stdio",
+        "--output",
+        ".zig-cache/smoke-device-stdio.pkrt",
+    }, "samples/device/request-infrared.pkrt");
     addSmoke(smoke_step, exe, &.{
         "project",
         "--json",
@@ -85,11 +127,26 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&fmt_check.step);
     check_step.dependOn(test_step);
     check_step.dependOn(smoke_step);
+    check_step.dependOn(&facts_check.step);
 }
 
 fn addSmoke(step: *std.Build.Step, exe: *std.Build.Step.Compile, args: []const []const u8) void {
     const command = step.owner.addRunArtifact(exe);
     command.addArgs(args);
+    step.dependOn(&command.step);
+}
+
+/// Feeds a recorded frame stream on stdin; this is the same transport a device
+/// serial link would use, without a device.
+fn addSmokeStdin(
+    step: *std.Build.Step,
+    exe: *std.Build.Step.Compile,
+    args: []const []const u8,
+    stdin_path: []const u8,
+) void {
+    const command = step.owner.addRunArtifact(exe);
+    command.addArgs(args);
+    command.setStdIn(.{ .lazy_path = step.owner.path(stdin_path) });
     step.dependOn(&command.step);
 }
 

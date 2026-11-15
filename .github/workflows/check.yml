@@ -42,6 +42,11 @@ jobs:
       - name: Smoke
         run: zig build smoke --summary all
 
+      # The fact sheet is generated from the source tree; this fails when a count
+      # changed without regenerating docs/facts.json or docs/capabilities/facts.md.
+      - name: Docs facts
+        run: zig build docs-check --summary all
+
       # The catalogue is a separate repository; validate the v2 export when present.
       - name: Validate catalogue v2
         if: hashFiles('PocketRootVulnerabilityDb/vulndb/catalog-v2.jsonl') != ''
