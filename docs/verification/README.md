@@ -55,8 +55,10 @@ verified on its own.
 
 The catalogue repository ships two validators. `tools/Validate-CatalogV2.ps1` checks the
 v2 export used by `vulns`: schema, identifier uniqueness, affected products, alias and
-version-rule limits, dotted version syntax, range shape, severity values, CVSS bounds and
-the SHA-256 of every line against its provenance record. The CI workflow runs it when the
+version-rule limits, version syntax, range shape, severity values, CVSS bounds, the
+reproduction tier and the SHA-256 of every line against its provenance record.
+`tools/Classify-Reproducibility.ps1` assigns that tier from CVSS metrics and the product
+class in `tools/products.json`. The CI workflow runs it when the
 catalogue checkout is present.
 
 `Validate.ps1` covers the original v1 catalogue: PowerShell 5.1, no dependencies,

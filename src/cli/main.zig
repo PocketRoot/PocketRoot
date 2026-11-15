@@ -806,6 +806,9 @@ fn printVulnerabilityReport(
         try printTerminalText(writer, endpoint.version);
         try writer.print(" - ", .{});
         try printTerminalText(writer, vulnerability.title);
+        if (vulnerability.reproducibility != .unclassified) {
+            try writer.print(" [{s}]", .{@tagName(vulnerability.reproducibility)});
+        }
         try writer.writeByte('\n');
         if (vulnerability.reference.len > 0) {
             try writer.print("    reference: ", .{});
