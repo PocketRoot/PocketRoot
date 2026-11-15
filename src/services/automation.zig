@@ -93,6 +93,12 @@ pub const Engine = struct {
         return self.variables.get(name);
     }
 
+    /// Exposes the bound variables for diagnostics; callers must not retain the iterator
+    /// past the next execution step.
+    pub fn variableIterator(self: *const Engine) std.StringHashMap([]const u8).Iterator {
+        return self.variables.iterator();
+    }
+
     fn storeVariable(self: *Engine, name: []const u8, value: []const u8) !void {
         const allocator = self.capabilities.allocator;
         if (self.variables.fetchRemove(name)) |old| {
@@ -229,7 +235,7 @@ const simulated_device = @import("../simulator/device.zig");
 
 test "automation routes actions through capabilities and audit" {
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.infrared);
 
@@ -255,7 +261,7 @@ test "automation routes actions through capabilities and audit" {
 
 test "automation cannot bypass active-operation policy" {
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.infrared);
 

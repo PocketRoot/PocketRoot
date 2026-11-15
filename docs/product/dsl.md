@@ -220,6 +220,34 @@ The catalogue repository runs these scripts, then the matcher, and compares both
 with the reproduction evidence:
 
 ```powershell
-PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1        # 14 checks
-PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1 -WithDocker
+PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1              # recorded observations
+PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1 -Live        # plus a real probe
+PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1 -Live -WithDocker
 ```
+
+### Live scanning
+
+`net.scan` reads the recorded observation unless the run asks for a probe:
+
+```powershell
+zig-out/bin/PocketRoot script run --live samples/scripts/live-scan.pk
+zig-out/bin/PocketRoot script run --live --dump-vars samples/scripts/live-scan.pk
+```
+
+The same payload drives both modes (`target=host:port`), and the result has the same
+`key=value` shape:
+
+```
+host=127.0.0.1
+port=8080
+state=open
+transport=tcp
+service=http
+product=Apache
+version=2.4.54
+```
+
+Live mode uses the TCP scanner, so protocol probes only run for the ports it knows
+(80, 443, 6379, 8080, 3306, 5432 and the other documented defaults). A host mapped to an
+unusual port connects successfully but reports no product or version. `--dump-vars`
+prints every bound variable and is intended for diagnostics, not for evidence.

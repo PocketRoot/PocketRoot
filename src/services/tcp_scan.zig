@@ -377,6 +377,17 @@ fn setProduct(probe: *PortProbe, product: []const u8) void {
 
 /// Software strings look like "OpenSSH_9.6p1", "dropbear_2022.83" or "nginx/1.25.3".
 /// The product name is the prefix before the separator or the first digit.
+/// Extracts the version that follows the first slash, e.g. "Apache/2.4.54 (Unix)".
+fn softwareVersion(software: []const u8) ?[]const u8 {
+    const slash = std.mem.indexOfScalar(u8, software, '/') orelse return null;
+    const start = slash + 1;
+    if (start >= software.len) return null;
+    var end = start;
+    while (end < software.len and software[end] != ' ' and software[end] != '\t' and software[end] != ';') : (end += 1) {}
+    if (end == start) return null;
+    return software[start..end];
+}
+
 fn productFromSoftware(software: []const u8) []const u8 {
     if (software.len == 0) return "unknown";
     var end: usize = 0;
@@ -442,6 +453,9 @@ fn confirmHttp(probe: *PortProbe, source: []const u8, response: []const u8) void
     setVersion(probe, version);
     if (findHeaderValue(response, "server")) |server| {
         setProduct(probe, productFromSoftware(server));
+        // The Server header carries the software version; the protocol version above is
+        // only a fallback for servers that do not send one.
+        if (softwareVersion(server)) |software| setVersion(probe, software);
     }
 }
 
@@ -981,4 +995,18 @@ test "TCP scan total deadline stops stalled service identification" {
         error.InvalidTotalTimeout,
         scan(std.testing.allocator, std.testing.io, "127.0.0.1", &.{80}, .{ .total_timeout_ms = 49 }),
     );
+}
+
+test "http evidence takes the software version from the Server header" {
+    var probe = PortProbe{ .state = .open, .service = "unknown" };
+    confirmHttp(&probe, "read-only-probe", "HTTP/1.1 200 OK\r\nServer: Apache/2.4.54 (Unix)\r\n\r\n");
+    try std.testing.expectEqualStrings("http", probe.service);
+    try std.testing.expectEqualStrings("Apache", probe.productText());
+    try std.testing.expectEqualStrings("2.4.54", probe.versionText());
+}
+
+test "http evidence falls back to the protocol version without a Server header" {
+    var probe = PortProbe{ .state = .open, .service = "unknown" };
+    confirmHttp(&probe, "read-only-probe", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    try std.testing.expectEqualStrings("HTTP/1.1", probe.versionText());
 }

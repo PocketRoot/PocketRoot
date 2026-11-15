@@ -34,7 +34,7 @@ const simulated_device = @import("device.zig");
 
 test "loopback crosses ipc capability policy audit and simulated backend" {
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.infrared);
 
@@ -57,7 +57,7 @@ test "loopback crosses ipc capability policy audit and simulated backend" {
 
 test "loopback returns policy denials as explicit responses" {
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.infrared);
 

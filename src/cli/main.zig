@@ -637,6 +637,8 @@ const ScriptRunRequest = struct {
     libs: []const []const u8 = &.{},
     authorize_active: bool = false,
     region: []const u8 = "",
+    live: bool = false,
+    dump_vars: bool = false,
 };
 
 fn parseScriptRunArgs(allocator: std.mem.Allocator, raw: []const [:0]const u8) !ScriptRunRequest {
@@ -660,6 +662,12 @@ fn parseScriptRunArgs(allocator: std.mem.Allocator, raw: []const [:0]const u8) !
         } else if (std.mem.eql(u8, raw[index], "--authorize-active")) {
             if (request.authorize_active) return error.InvalidScriptArgs;
             request.authorize_active = true;
+            index += 1;
+        } else if (std.mem.eql(u8, raw[index], "--dump-vars")) {
+            request.dump_vars = true;
+            index += 1;
+        } else if (std.mem.eql(u8, raw[index], "--live")) {
+            request.live = true;
             index += 1;
         } else if (std.mem.eql(u8, raw[index], "--region")) {
             if (request.region.len != 0 or index + 1 >= raw.len) return error.InvalidScriptArgs;
@@ -724,8 +732,9 @@ fn runScriptCommand(
     defer source.deinit();
 
     var harness: PocketRoot.simulator.device.Harness = undefined;
-    harness.init(allocator, .{ .region = request.region, .allow_active = request.authorize_active });
+    harness.init(allocator, .{ .region = request.region, .allow_active = request.authorize_active }, io);
     defer harness.deinit();
+    harness.backend.live = request.live;
     enableAllKinds(&harness.backend);
 
     var executor: PocketRoot.ScriptExecutor = undefined;
@@ -755,6 +764,24 @@ fn runScriptCommand(
             @tagName(entry.status),
         });
     }
+    if (request.dump_vars) {
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(allocator);
+        var iterator = executor.engine.variableIterator();
+        while (iterator.next()) |entry| names.append(allocator, entry.key_ptr.*) catch return error.OutOfMemory;
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+        try writer.print("variables: {d}\n", .{names.items.len});
+        for (names.items) |name| {
+            if (executor.engine.variableValue(name)) |value| {
+                try writer.print("  {s}={s}\n", .{ name, value });
+            }
+        }
+    }
+
     const emitted = executor.emitted();
     if (emitted.len > 0) {
         try writer.print("emitted: {d}\n", .{emitted.len});

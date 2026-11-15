@@ -552,7 +552,7 @@ test "evaluates a branch at runtime from a bound variable" {
     defer source.deinit();
 
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.subghz);
 
@@ -583,7 +583,7 @@ test "takes the else branch when the condition is false" {
     defer source.deinit();
 
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.subghz);
 
@@ -616,7 +616,7 @@ test "unrolls a bounded for loop and binds the counter" {
     try std.testing.expectEqual(@as(usize, 7), compiled.definition.steps.len);
 
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.subghz);
 
@@ -649,7 +649,7 @@ test "out exports a variable to the following step" {
     defer source.deinit();
 
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.subghz);
 
@@ -742,7 +742,7 @@ test "active operations are denied without policy authorization" {
     defer source.deinit();
 
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.subghz);
 
@@ -793,7 +793,7 @@ test "inlines a sub-script into the caller" {
     defer caller.deinit();
 
     var harness: simulated_device.Harness = undefined;
-    harness.init(std.testing.allocator, .{});
+    harness.init(std.testing.allocator, .{}, null);
     defer harness.deinit();
     harness.backend.enable(.subghz);
 

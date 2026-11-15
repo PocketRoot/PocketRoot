@@ -1,0 +1,30 @@
+-- Probes the target at run time instead of reading the recorded observation.
+-- Run with: PocketRoot script run --live samples/scripts/live-scan.pk
+script "live-scan" do
+    use "pack.net"
+
+    cap scan = net.scan
+
+    step "probe" do
+        observation = scan { payload = "target=127.0.0.1:8080" }
+        out observation
+
+        if observation.state == "open" then
+            emit info "live: state=open"
+        else
+            emit warning "live: state is not open"
+        end
+
+        if observation.product == "Apache" then
+            emit info "live: product=Apache"
+        else
+            emit warning "live: product differs from Apache"
+        end
+
+        if observation.version == "2.4.54" then
+            emit info "live: version=2.4.54"
+        else
+            emit warning "live: version differs from 2.4.54"
+        end
+    end
+end
