@@ -1,0 +1,21 @@
+{
+  "schema": "pocketroot.exploit.v1",
+  "cve": "FIXTURE-DISCOVER",
+  "target": "127.0.0.1:8080",
+  "effect": "read_file",
+  "params": [],
+  "steps": [
+    {
+      "name": "read",
+      "method": "GET",
+      "path": "/discover?f={{file}}",
+      "expect_status": 200,
+      "capture": {
+        "name": "route",
+        "prefix": "route=",
+        "suffix": ";"
+      }
+    }
+  ],
+  "expect_contains": ""
+}

@@ -1,0 +1,63 @@
+{
+  "schema": "pocketroot.adaptive.v1",
+  "id": "ADAPT-FIXTURE",
+  "target": "127.0.0.1:8080",
+  "goal": {
+    "contains": "uid="
+  },
+  "max_steps": 4,
+  "facts": [
+    {
+      "name": "service",
+      "value": "http"
+    }
+  ],
+  "modules": [
+    {
+      "id": "discover",
+      "record": "samples/adaptive/records/discover.json",
+      "requires": [
+        {
+          "fact": "service",
+          "equals": "http"
+        }
+      ],
+      "inputs": [
+        {
+          "name": "file",
+          "fact": "target_file",
+          "default": "/etc/passwd"
+        }
+      ],
+      "outputs": [
+        {
+          "fact": "route",
+          "capture": "route"
+        }
+      ],
+      "priority": 0
+    },
+    {
+      "id": "cmd",
+      "record": "samples/adaptive/records/cmd.json",
+      "requires": [
+        {
+          "fact": "route",
+          "equals": "cmd"
+        }
+      ],
+      "priority": 10
+    },
+    {
+      "id": "file",
+      "record": "samples/adaptive/records/file.json",
+      "requires": [
+        {
+          "fact": "route",
+          "equals": "file"
+        }
+      ],
+      "priority": 10
+    }
+  ]
+}

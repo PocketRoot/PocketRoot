@@ -11,7 +11,7 @@
 | DSL packs | 5 |
 | Test blocks under src/ (declared) | 352 |
 | CLI smoke invocations | 15 |
-| Sample files | 38 |
+| Sample files | 43 |
 | Catalogue v1 entries | 9 |
 | Catalogue v2 entries | 9064 |
 

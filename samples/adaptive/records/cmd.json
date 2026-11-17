@@ -1,0 +1,16 @@
+{
+  "schema": "pocketroot.exploit.v1",
+  "cve": "FIXTURE-CMD",
+  "target": "127.0.0.1:8080",
+  "effect": "read_file",
+  "params": [],
+  "steps": [
+    {
+      "name": "read",
+      "method": "GET",
+      "path": "/exec",
+      "expect_status": 200
+    }
+  ],
+  "expect_contains": ""
+}
