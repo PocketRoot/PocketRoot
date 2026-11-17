@@ -220,6 +220,17 @@ pub const Execution = struct {
     }
 };
 
+const StopContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    campaign_dir: []const u8,
+};
+
+fn stopCheck(context: *anyopaque) bool {
+    const stop: *StopContext = @ptrCast(@alignCast(context));
+    return control.isStopped(stop.allocator, stop.io, stop.campaign_dir);
+}
+
 fn factValue(facts: *const std.StringHashMap([]const u8), name: []const u8) ?[]const u8 {
     return facts.get(name);
 }
@@ -317,6 +328,11 @@ pub fn runForTarget(
     for (goal.facts) |fact| try facts.put(fact.name, fact.value);
     try facts.put("target", target);
 
+    var stop_context = StopContext{
+        .allocator = allocator,
+        .io = io,
+        .campaign_dir = campaign_dir,
+    };
     var executed = std.StringHashMap(void).init(allocator);
     defer executed.deinit();
     var steps: std.ArrayList(StepResult) = .empty;
@@ -356,8 +372,10 @@ pub fn runForTarget(
         };
         defer spec.deinit();
         spec.target = target;
-        var outcome = exploit.run(allocator, io, &spec, overrides.items) catch |err| {
-            status = @errorName(err);
+        var outcome = exploit.runWithOptions(allocator, io, &spec, overrides.items, .{
+            .stop = .{ .context = &stop_context, .isStopped = stopCheck },
+        }) catch |err| {
+            status = if (err == error.Stopped) "stopped" else @errorName(err);
             break;
         };
         defer outcome.deinit();

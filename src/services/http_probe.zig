@@ -203,12 +203,27 @@ fn buildRequest(allocator: std.mem.Allocator, spec: *const Spec, target: Target)
     return output.toOwnedSlice();
 }
 
+pub const StopCheck = struct {
+    context: *anyopaque,
+    isStopped: *const fn (*anyopaque) bool,
+};
+
 pub fn probe(allocator: std.mem.Allocator, io: std.Io, spec: *const Spec) !Response {
+    return probeWithStop(allocator, io, spec, null);
+}
+
+pub fn probeWithStop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    spec: *const Spec,
+    stop: ?StopCheck,
+) !Response {
     const target = try parseTarget(spec.target);
-    const timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = std.Io.Duration.fromMilliseconds(spec.timeout_ms),
         .clock = .awake,
-    }) };
+    });
+    const timeout: std.Io.Timeout = .{ .deadline = deadline };
     var address = try tcp_scan.resolveWithTimeout(io, target.host, target.port, timeout);
     address.setPort(target.port);
     const stream = try tcp_scan.connectWithTimeout(io, &address, timeout);
@@ -224,10 +239,24 @@ pub fn probe(allocator: std.mem.Allocator, io: std.Io, spec: *const Spec) !Respo
     var reader = stream.reader(io, &reader_buffer);
     var total: usize = 0;
     while (total < raw.len) {
-        const count = tcp_scan.readWithTimeout(io, &reader, raw[total..], timeout) catch |err| switch (err) {
+        if (stop) |check| {
+            if (check.isStopped(check.context)) return error.Stopped;
+        }
+        const now = std.Io.Clock.Timestamp.now(io, .awake);
+        if (now.raw.nanoseconds >= deadline.raw.nanoseconds) {
+            if (total == 0) return error.Timeout;
+            break;
+        }
+        const slice_timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = std.Io.Duration.fromMilliseconds(100),
+            .clock = .awake,
+        }) };
+        const count = tcp_scan.readWithTimeout(io, &reader, raw[total..], slice_timeout) catch |err| switch (err) {
             error.Timeout => {
-                if (total == 0) return error.Timeout;
-                break;
+                if (stop) |check| {
+                    if (check.isStopped(check.context)) return error.Stopped;
+                }
+                continue;
             },
             else => return err,
         };

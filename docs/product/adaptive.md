@@ -109,7 +109,7 @@ evidence document; a reused approval is audited as `denied`.
 |---|---|
 | No multi-target campaign | one goal targets one host |
 | No concurrency | modules run sequentially |
-| No in-flight STOP | STOP is checked between modules; a request already in flight is not cancelled |
+| In-flight STOP | the HTTP read loop checks the STOP marker every ~100 ms and aborts with status `stopped`; a connect/write already in progress can still complete |
 | No automatic module synthesis | modules are authored records with declared facts |
 | No backtracking | once a module is executed it is excluded; there is no search over alternatives |
 | HTTP records only | transports remain the record's transport |

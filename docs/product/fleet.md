@@ -61,7 +61,7 @@ about 700 ms while each target needed two 300 ms requests, showing the batch ove
 |---|---|
 | No per-target result merge | each target has its own evidence and facts |
 | No retry | a failed target stays failed until rerun with a new approval |
-| No in-flight STOP cancellation | STOP is checked between modules/batches; an already-sent HTTP request is not aborted |
+| In-flight STOP | each target's adaptive HTTP reads check STOP every ~100 ms; batch scheduling still starts only before a stop is seen |
 | No automatic module synthesis | modules come from the goal |
 | No backtracking | executed modules are excluded |
 | HTTP records only | transports are the record's transport |

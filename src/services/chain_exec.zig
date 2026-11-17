@@ -8,6 +8,17 @@ const control = @import("control.zig");
 const chain = @import("chain.zig");
 const exploit = @import("exploit.zig");
 
+const StopContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    campaign_dir: []const u8,
+};
+
+fn stopCheck(context: *anyopaque) bool {
+    const stop: *StopContext = @ptrCast(@alignCast(context));
+    return control.isStopped(stop.allocator, stop.io, stop.campaign_dir);
+}
+
 pub const StepResult = struct {
     cve: []const u8,
     effect: exploit.Effect,
@@ -84,6 +95,11 @@ pub fn run(
         .detail = plan.id,
     }, now);
 
+    var stop_context = StopContext{
+        .allocator = allocator,
+        .io = io,
+        .campaign_dir = campaign_dir,
+    };
     var status: []const u8 = "succeeded";
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
@@ -112,8 +128,10 @@ pub fn run(
         };
         defer spec.deinit();
         spec.target = step.target;
-        var outcome = exploit.run(allocator, io, &spec, spec.params) catch |err| {
-            status = @errorName(err);
+        var outcome = exploit.runWithOptions(allocator, io, &spec, spec.params, .{
+            .stop = .{ .context = &stop_context, .isStopped = stopCheck },
+        }) catch |err| {
+            status = if (err == error.Stopped) "stopped" else @errorName(err);
             break;
         };
         defer outcome.deinit();

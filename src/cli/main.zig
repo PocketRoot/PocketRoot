@@ -3918,6 +3918,17 @@ fn runCampaignApproveExploit(
     );
 }
 
+const ExploitStopContext = struct {
+    allocator: std.mem.Allocator,
+    io: Io,
+    dir: []const u8,
+};
+
+fn exploitStopCheck(context: *anyopaque) bool {
+    const stop: *ExploitStopContext = @ptrCast(@alignCast(context));
+    return PocketRoot.services.control.isStopped(stop.allocator, stop.io, stop.dir);
+}
+
 fn runExploitCommand(
     allocator: std.mem.Allocator,
     io: Io,
@@ -4033,8 +4044,11 @@ fn runExploitCommand(
         .detail = spec.cve,
     }, now);
 
-    var outcome = PocketRoot.services.exploit.run(allocator, io, &spec, params.items) catch |err| {
-        try writer.print("exploit failed: {s}\n", .{@errorName(err)});
+    var stop_context = ExploitStopContext{ .allocator = allocator, .io = io, .dir = dir };
+    var outcome = PocketRoot.services.exploit.runWithOptions(allocator, io, &spec, params.items, .{
+        .stop = .{ .context = &stop_context, .isStopped = exploitStopCheck },
+    }) catch |err| {
+        try writer.print("exploit stopped/failed: {s}\n", .{@errorName(err)});
         PocketRoot.services.control.appendLedger(allocator, io, dir, .{
             .event = "exploit-result",
             .action_id = action.action_id,

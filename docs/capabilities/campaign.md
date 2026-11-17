@@ -113,9 +113,9 @@ entry. `evaluate` checks the stop marker before anything else, so:
 
 - a new action is refused with `campaign is stopped`;
 - arming clears the marker only through an explicit `campaign arm`;
-- `exploit run` checks the marker before the first request and after the last one; it does
-  not currently check between every step, so a stop cannot interrupt a multi-step chain in
-  flight.
+- `exploit run`, `chain run` and adaptive execution pass a stop check into the HTTP read
+  loop; the marker aborts an in-flight read within about 100 ms. Connect/write already in
+  progress is not aborted, and non-HTTP transports do not check it yet.
 
 The stop control is software-only today. A real device must add an independent hardware
 inhibit line and a watchdog; the marker is not a substitute for cutting PA/VBUS/NFC power.
