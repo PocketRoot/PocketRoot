@@ -200,6 +200,9 @@ The DSL compiles a `net.http` call into a JSON payload carried by the network ca
 {"kind":"http","target":"127.0.0.1:8080","method":"GET","path":"/cgi-bin/.%2e/etc/passwd","body":"","headers":[],"timeout_ms":2000,"expect_status":200,"expect_body":"root:x:0:0","expect_absent":""}
 ```
 
+Exploit records now carry a record-level `transport` (`http` default, `udp`); UDP steps
+use `data` and the response body is the datagram payload.
+
 A `net.udp` call compiles to `{"kind":"udp","target":...,"data":...,"timeout_ms":...,"expect_min_bytes":...,"expect_body":...,"expect_absent":...}`.
 
 The live backend dispatches HTTP to `services/http_probe.zig`, UDP to `services/udp_probe.zig`; the capability kernel, audit

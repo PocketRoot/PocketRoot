@@ -64,6 +64,6 @@ about 700 ms while each target needed two 300 ms requests, showing the batch ove
 | In-flight STOP | each target's adaptive HTTP reads check STOP every ~100 ms; batch scheduling still starts only before a stop is seen |
 | Synthesis is metadata-driven | a goal can use `records`; modules come from record metadata or match/capture inference |
 | Backtracking replays requests | per-target DFS restores runner state, not target-side effects |
-| HTTP records only | transports are the record's transport |
+| HTTP + UDP records only | other transports need new primitives |
 
 These are deliberate gaps; the next work is in-flight cancellation and module synthesis.

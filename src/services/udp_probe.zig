@@ -103,6 +103,32 @@ fn parseTarget(text: []const u8) !struct { host: []const u8, port: u16 } {
     return .{ .host = host, .port = port };
 }
 
+/// One request/response datagram without an oracle. Used by non-HTTP exploit records.
+pub fn exchange(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target_text: []const u8,
+    data: []const u8,
+    timeout_ms: u32,
+) ![]u8 {
+    if (data.len == 0 or data.len > 4096) return error.InvalidDatagram;
+    if (timeout_ms < 50 or timeout_ms > 5000) return error.InvalidTimeout;
+    const target = try parseTarget(target_text);
+    const timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = std.Io.Duration.fromMilliseconds(timeout_ms),
+        .clock = .awake,
+    }) };
+    var address = try tcp_scan.resolveWithTimeout(io, target.host, target.port, timeout);
+    address.setPort(target.port);
+    const local = std.Io.net.IpAddress{ .ip4 = std.Io.net.Ip4Address.unspecified(0) };
+    var socket = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(io);
+    try socket.send(io, &address, data);
+    var buffer: [max_datagram_bytes]u8 = undefined;
+    const message = try receiveDatagram(&socket, io, &buffer, timeout);
+    return allocator.dupe(u8, message.data);
+}
+
 pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !capability.Result {
     var spec = parseSpec(allocator, payload) catch |err| {
         return capability.Result.init(allocator, .failed, @errorName(err));
