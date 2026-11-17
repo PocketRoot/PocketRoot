@@ -1,0 +1,15 @@
+{
+  "schema": "pocketroot.surface.v1",
+  "scope_id": "lab-chain",
+  "actions": [
+    {
+      "id": "ACTION-DRUPAL-7600",
+      "target": "127.0.0.1:18401",
+      "target_identity": "lab-drupal",
+      "vulnerability_id": "CVE-2018-7600",
+      "technique": "exploit",
+      "feasibility": "feasible",
+      "params_hash": "lab-chain"
+    }
+  ]
+}

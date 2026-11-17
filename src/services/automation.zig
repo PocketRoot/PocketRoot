@@ -43,6 +43,8 @@ pub const ActionSpec = struct {
     /// Variable path that supplies the payload at execution time. Mutually exclusive
     /// with a literal payload; unresolved paths fail the action.
     payload_ref: ?[]const u8 = null,
+    /// Variable path substituted for the HTTP request path placeholder at run time.
+    path_ref: ?[]const u8 = null,
     active_authorized: bool = false,
     /// A deliberate script failure: append an error finding, fail the step and stop the run.
     fail: ?[]const u8 = null,
@@ -198,7 +200,14 @@ pub const Engine = struct {
         const request_id = self.next_request_id;
         self.next_request_id +%= 1;
 
-        const payload = if (spec.payload_ref) |path| try self.requireVariable(path) else spec.payload;
+        var payload = if (spec.payload_ref) |path| try self.requireVariable(path) else spec.payload;
+        var replaced: ?[]u8 = null;
+        defer if (replaced) |value| self.capabilities.allocator.free(value);
+        if (spec.path_ref) |path| {
+            const value = try self.requireVariable(path);
+            replaced = try std.mem.replaceOwned(u8, self.capabilities.allocator, payload, "__POCKETROOT_PATH_REF__", value);
+            payload = replaced.?;
+        }
         var result = self.capabilities.execute(.{
             .id = request_id,
             .subject = spec.subject,

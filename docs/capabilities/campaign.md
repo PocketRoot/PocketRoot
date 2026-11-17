@@ -74,6 +74,11 @@ PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json \
 PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json \
     --campaign .pocketroot --param command=id
 
+# one approval for a detected chain
+PocketRoot chain plan --observations samples/observations/lab.json --out chain.json
+PocketRoot chain approve chain.json --reason "ticket CHAIN-1" --confirm CHAIN-...
+PocketRoot chain run chain.json --campaign .pocketroot
+
 PocketRoot campaign status
 PocketRoot campaign stop
 ```
@@ -134,6 +139,13 @@ the sorted effective params (`--param k=v`), then `exploit run --campaign <dir>`
 consumes the approval before its first request and writes `exploit-start`/`exploit-result`.
 Changing the command, file, target or any step invalidates the approval. See
 [exploits](../product/exploits.md).
+
+### 5.3 Chain approvals
+
+`chain approve` binds the plan bytes and target; `chain run` re-checks every record
+digest, checks STOP before and after each step, consumes the approval before the first
+step and writes `chain-start`, `chain-step` and `chain-result`. This is the single
+approval path for automatic multi-step exploitation.
 
 ## 6. Ledger
 

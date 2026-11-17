@@ -27,6 +27,9 @@ The I/O column states where the work actually happens.
 | `reproduce <record.json>` | any | real TCP/UDP | `http_probe`/`udp_probe` + DSL | 256 KiB response, 1-4096 B datagram, 50-5000 ms | failed oracle, invalid record or ungated exploit: exit 1 |
 | `campaign approve-exploit <record.json>` | any | filesystem | `services/control.zig` | record bytes + target + params, one approval | disarmed or outside scope: exit 1 |
 | `exploit run <record.json>` | any | real TCP | `services/exploit.zig` | 1-8 HTTP steps, 4 KiB effect evidence | missing approval, missing capture/extract or failed transport: exit 1 |
+| `chain plan --observations <file>` | any | filesystem | `services/chain.zig` | 1-8 matched records, digest-bound plan | no match: exit 1 |
+| `chain approve <plan.json>` | any | filesystem | `services/control.zig` | plan bytes + target, one approval | disarmed or outside scope: exit 1 |
+| `chain run <plan.json>` | any | real TCP | `services/chain.zig` + `exploit.zig` | STOP before/after each step, record digest check | changed record/plan or failed step: exit 1 |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |
 | `capture <s> <out> <comp>` | Windows only | real | `pktmon` start/stop/etl2pcap | 1-60 s, 1-64 MB, output <= 80 MiB | refuses overwrite, validates pcapng header and trailer |
@@ -69,6 +72,7 @@ The commands above are exercised by the smoke checks in `build.zig`.
 | `services/http_probe.zig` | Raw HTTP/1.1 request and oracle for reproduction scripts | `net.http` via `script run --live`, `reproduce` |
 | `services/udp_probe.zig` | One datagram and an amplification/size oracle | `net.udp` via `script run --live`, `reproduce` |
 | `services/exploit.zig` | Ordered HTTP exploit steps, capture/extract and effect evidence | `exploit run` |
+| `services/chain.zig` | Observation-to-record matching and digest-bound chain plans | `chain plan/run` |
 
 ## 4. Failure semantics
 

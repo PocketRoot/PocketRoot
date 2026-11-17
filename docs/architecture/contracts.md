@@ -215,6 +215,13 @@ the text between two delimiters; `extract` returns the effect between two delimi
 `effect: command` requires an extract (the runner wraps the command in markers);
 `effect: read_file` falls back to the final response body.
 
+### 4.3 `pocketroot.chain.v1`
+
+A plan step records `cve`, `record` path, `effect`, `target` and the record byte
+digest. `chain run` re-hashes each record before executing it. The approval binds the
+plan bytes (not each record), so one approval covers the chain while any plan or record
+change invalidates it. STOP is checked before and after every step.
+
 ## 5. Schema identifiers
 
 | Schema | Location | Purpose |
@@ -236,6 +243,9 @@ the text between two delimiters; `extract` returns the effect between two delimi
 | `pocketroot.reproduction.evidence.v1` | `cli/main.zig` | One reproduction run, observed outcome and approval id when gated |
 | `pocketroot.exploit.v1` | `samples/exploits/*/record.json` | Ordered HTTP steps, capture/extract delimiters and an effect |
 | `pocketroot.exploit.evidence.v1` | `cli/main.zig` | Effect output, per-step status and the approval that authorised it |
+| `pocketroot.observations.v1` | `samples/observations/*.json` | Target fingerprint input to chain planning |
+| `pocketroot.chain.v1` | `chain plan` | Ordered, digest-bound exploit plan for one target |
+| `pocketroot.chain.evidence.v1` | `chain run` | One chain execution and its per-step outputs |
 
 The schema identifier is the compatibility boundary. Changing fields without bumping the
 version breaks consumers; `UnsupportedCatalogSchema` reports a mismatch.

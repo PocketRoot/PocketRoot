@@ -150,12 +150,14 @@ const Compiler = struct {
         }
         const is_http = std.mem.eql(u8, cap.verb, "net.http");
         const is_udp = std.mem.eql(u8, cap.verb, "net.udp");
-        const http_payload = if (is_http)
+        const http_compiled = if (is_http)
             try httpSpec(self.a, call.options)
-        else if (is_udp)
+        else
+            HttpCompiled{ .payload = "", .path_ref = null };
+        const http_payload = if (is_udp)
             try udpSpec(self.a, call.options)
         else
-            "";
+            http_compiled.payload;
         try self.addAction(
             id,
             .{
@@ -166,6 +168,7 @@ const Compiler = struct {
                 .region = try regionOption(cap, options.policy_region),
                 .payload = if (is_http or is_udp) http_payload else payload_literal orelse "",
                 .payload_ref = if (is_http or is_udp) null else payload_ref,
+                .path_ref = http_compiled.path_ref,
                 .active_authorized = options.authorize_active,
                 .bind = bind,
             },
@@ -394,14 +397,26 @@ fn allConnectors(connectors: []const script.Connector, expected: script.Connecto
 }
 
 const EmitSpec = struct { emit: automation.Emit, payload: []const u8 };
+const HttpCompiled = struct { payload: []const u8, path_ref: ?[]const u8 };
 
 /// The DSL's net.http call is compiled into a JSON request spec; the live backend
 /// parses it and runs services/http_probe. Keeping the spec in the payload means the
 /// capability kernel, audit and workflow stay unchanged.
-fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
     const target = (try literalString(options, "target")) orelse return error.InvalidOptionValue;
     const method = (try literalString(options, "method")) orelse "GET";
-    const path = (try literalString(options, "path")) orelse "/";
+    var path_ref: ?[]const u8 = null;
+    var path: []const u8 = "/";
+    if (optionValue(options, "path")) |value| {
+        switch (value) {
+            .string => |text| path = text,
+            .reference => |reference| {
+                path_ref = reference;
+                path = "__POCKETROOT_PATH_REF__";
+            },
+            else => return error.InvalidOptionValue,
+        }
+    }
     const body = (try literalString(options, "body")) orelse "";
 
     var timeout_ms: u32 = 2000;
@@ -418,6 +433,19 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
         expect_status = @intCast(value);
     } else if (try literalString(options, "expect_status")) |text| {
         expect_status = std.fmt.parseInt(u16, text, 10) catch return error.InvalidOptionValue;
+    }
+
+    const capture_name = try literalString(options, "capture_name");
+    const capture_prefix = try literalString(options, "capture_prefix");
+    const capture_suffix = try literalString(options, "capture_suffix");
+    const CaptureWire = struct { name: []const u8, prefix: []const u8, suffix: []const u8 };
+    var capture: ?CaptureWire = null;
+    if (capture_name != null or capture_prefix != null or capture_suffix != null) {
+        const name = capture_name orelse return error.InvalidOptionValue;
+        const prefix = capture_prefix orelse return error.InvalidOptionValue;
+        const suffix = capture_suffix orelse return error.InvalidOptionValue;
+        if (name.len == 0 or prefix.len == 0 or suffix.len == 0) return error.InvalidOptionValue;
+        capture = .{ .name = name, .prefix = prefix, .suffix = suffix };
     }
 
     const HeaderWire = struct { name: []const u8, value: []const u8 };
@@ -443,6 +471,7 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
         path: []const u8,
         body: []const u8,
         headers: []const HeaderWire,
+        capture: ?CaptureWire,
         timeout_ms: u32,
         expect_status: ?u16,
         expect_body: []const u8,
@@ -461,12 +490,16 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
         .path = path,
         .body = body,
         .headers = header_list.items,
+        .capture = capture,
         .timeout_ms = timeout_ms,
         .expect_status = expect_status,
         .expect_body = (try literalString(options, "expect_body")) orelse "",
         .expect_absent = (try literalString(options, "expect_absent")) orelse "",
     }) catch return error.OutOfMemory;
-    return output.toOwnedSlice() catch error.OutOfMemory;
+    return .{
+        .payload = try output.toOwnedSlice(),
+        .path_ref = path_ref,
+    };
 }
 
 fn udpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
@@ -612,6 +645,13 @@ fn regionOption(cap: script.Cap, policy_region: []const u8) Error![]const u8 {
     // No region option: active subghz requests are denied by the kernel unless the
     // policy and request both carry a region, so an empty value stays safe.
     return "";
+}
+
+fn optionValue(options: []const script.Option, key: []const u8) ?script.Value {
+    for (options) |option| {
+        if (std.mem.eql(u8, option.key, key)) return option.value;
+    }
+    return null;
 }
 
 /// Rejects references and non-string values for options the HTTP compiler needs as
@@ -1206,6 +1246,9 @@ test "net.http compiles to a json request spec" {
         \\            method = "GET",
         \\            path = "/cgi-bin/.%2e/etc/passwd",
         \\            headers = "X-Test: yes; X-Other: 1",
+        \\            capture_name = "build_id",
+        \\            capture_prefix = "value=",
+        \\            capture_suffix = ",",
         \\            expect_status = 200,
         \\            expect_body = "root:x:0:0",
         \\        }
@@ -1225,6 +1268,7 @@ test "net.http compiles to a json request spec" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"expect_status\":200") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "X-Test") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "X-Other") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "build_id") != null);
     try std.testing.expect(compiled.actions[1].fail != null);
 }
 
@@ -1252,4 +1296,32 @@ test "net.udp compiles to a json datagram spec" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"udp\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "stats") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"expect_min_bytes\":16") != null);
+}
+
+test "net.http path can reference a captured field" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "chain" do
+        \\    use "pack.net"
+        \\    cap probe = net.http
+        \\    step "chain" do
+        \\        first = probe {
+        \\            target = "127.0.0.1:8080",
+        \\            path = "/poison",
+        \\            capture_name = "next",
+        \\            capture_prefix = "next=",
+        \\            capture_suffix = ";",
+        \\        }
+        \\        second = probe {
+        \\            target = "127.0.0.1:8080",
+        \\            path = first.captured,
+        \\        }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    try std.testing.expect(compiled.actions.len >= 2);
+    try std.testing.expectEqualStrings("first.captured", compiled.actions[1].path_ref.?);
+    try std.testing.expect(std.mem.indexOf(u8, compiled.actions[1].payload, "__POCKETROOT_PATH_REF__") != null);
 }

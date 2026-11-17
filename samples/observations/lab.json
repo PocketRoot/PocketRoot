@@ -1,0 +1,12 @@
+{
+  "schema": "pocketroot.observations.v1",
+  "observations": [
+    {
+      "target": "127.0.0.1:18401",
+      "service": "http",
+      "product": "drupal",
+      "version": "7.57",
+      "cves": []
+    }
+  ]
+}

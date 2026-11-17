@@ -17,6 +17,7 @@ pub const max_target_bytes = 255;
 pub const Method = enum { get, post, head, put, delete };
 
 pub const Header = struct { name: []const u8, value: []const u8 };
+pub const Capture = struct { name: []const u8, prefix: []const u8, suffix: []const u8 };
 
 pub const Spec = struct {
     arena: std.heap.ArenaAllocator,
@@ -25,6 +26,7 @@ pub const Spec = struct {
     path: []const u8,
     body: []const u8,
     headers: []const Header,
+    capture: ?Capture,
     timeout_ms: u32,
     expect_status: ?u16,
     expect_body: []const u8,
@@ -37,6 +39,7 @@ pub const Spec = struct {
 };
 
 const HeaderWire = struct { name: []const u8 = "", value: []const u8 = "" };
+const CaptureWire = struct { name: []const u8 = "", prefix: []const u8 = "", suffix: []const u8 = "" };
 
 const SpecWire = struct {
     kind: []const u8 = "http",
@@ -45,6 +48,7 @@ const SpecWire = struct {
     path: []const u8 = "/",
     body: []const u8 = "",
     headers: []const HeaderWire = &.{},
+    capture: ?CaptureWire = null,
     timeout_ms: u32 = 2000,
     expect_status: ?u16 = null,
     expect_body: []const u8 = "",
@@ -97,6 +101,16 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
         headers[header_index] = .{ .name = header.name, .value = header.value };
     }
     if (header_bytes > 8 * 1024) return error.HeadersTooLarge;
+    var capture: ?Capture = null;
+    if (wire.capture) |value| {
+        if (value.name.len == 0 or value.name.len > 64) return error.InvalidCapture;
+        if (value.prefix.len == 0 or value.suffix.len == 0) return error.InvalidCapture;
+        if (value.prefix.len > 1024 or value.suffix.len > 1024) return error.InvalidCapture;
+        for (value.name) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '_') return error.InvalidCapture;
+        }
+        capture = .{ .name = value.name, .prefix = value.prefix, .suffix = value.suffix };
+    }
     const method = std.meta.stringToEnum(Method, wire.method) orelse blk: {
         // Accept upper-case spellings from the DSL.
         if (std.ascii.eqlIgnoreCase(wire.method, "GET")) break :blk Method.get;
@@ -117,6 +131,7 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
         .path = wire.path,
         .body = wire.body,
         .headers = headers,
+        .capture = capture,
         .timeout_ms = wire.timeout_ms,
         .expect_status = wire.expect_status,
         .expect_body = wire.expect_body,
@@ -301,6 +316,14 @@ fn decodeChunked(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     return error.IncompleteChunk;
 }
 
+fn findBetween(body: []const u8, prefix: []const u8, suffix: []const u8) ?[]const u8 {
+    const start = std.mem.indexOf(u8, body, prefix) orelse return null;
+    const from = start + prefix.len;
+    if (from > body.len) return null;
+    const end = std.mem.indexOfPos(u8, body, from, suffix) orelse return null;
+    return body[from..end];
+}
+
 fn appendEscaped(writer: *std.Io.Writer, text: []const u8) !void {
     const limit = @min(text.len, 512);
     for (text[0..limit]) |byte| {
@@ -353,6 +376,15 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !c
     try writer.print("body_bytes={d}\n", .{response.body.len});
     try writer.writeAll("body_prefix=");
     try appendEscaped(writer, response.body);
+    try writer.writeAll("\ncaptured=");
+    var capture_found = false;
+    if (spec.capture) |capture| {
+        if (findBetween(response.body, capture.prefix, capture.suffix)) |value| {
+            capture_found = true;
+            try appendEscaped(writer, value);
+        }
+    }
+    try writer.print("\ncapture_found={d}", .{@intFromBool(capture_found)});
     try writer.writeByte('\n');
     try writer.print("oracle={s}\n", .{if (oracle_pass) "pass" else "fail"});
     try writer.print("oracle_reason={s}\n", .{reason});
@@ -466,7 +498,7 @@ fn serveHeader(server: *std.Io.net.Server, io: std.Io) std.Io.Cancelable!void {
     const count = reader.interface.readVec(&slices) catch return;
     const has_header = std.mem.indexOf(u8, request[0..count], "X-Test: yes\r\n") != null;
     const response = if (has_header)
-        "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nheader-ok"
+        "HTTP/1.1 200 OK\r\nContent-Length: 22\r\n\r\ncaptured=yes;header-ok"
     else
         "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\ndenied";
     tcp_scan.writeSmallRequestWithTimeout(io, stream, response, .{ .duration = .{
@@ -488,13 +520,14 @@ test "http probe sends custom headers and uses them in the oracle" {
     const port = server.socket.address.getPort();
 
     const spec = try std.fmt.allocPrint(std.testing.allocator,
-        \\{{"kind":"http","target":"127.0.0.1:{d}","method":"GET","path":"/","headers":[{{"name":"X-Test","value":"yes"}}],"expect_status":200,"expect_body":"header-ok"}}
+        \\{{"kind":"http","target":"127.0.0.1:{d}","method":"GET","path":"/","headers":[{{"name":"X-Test","value":"yes"}}],"capture":{{"name":"marker","prefix":"captured=","suffix":";"}},"expect_status":200,"expect_body":"header-ok"}}
     , .{port});
     defer std.testing.allocator.free(spec);
     var result = try execute(std.testing.allocator, std.testing.io, spec);
     defer result.deinit();
     try group.await(std.testing.io);
     try std.testing.expect(std.mem.indexOf(u8, result.data, "oracle=pass") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.data, "captured=yes") != null);
 }
 
 test "http spec rejects header injection" {

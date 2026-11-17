@@ -50,6 +50,13 @@ PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --evidence
 PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json --reason "ticket SEC-2" --confirm CVE-2018-7600 --param command=id
 PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json --campaign .pocketroot --param command=id --evidence exploit.json
 
+# detect a chain from observations, approve it once, then execute every step
+PocketRoot chain plan --observations samples/observations/lab.json --records samples/exploits --out chain.json
+# or derive observations from a surface report:
+PocketRoot chain plan --surface samples/campaign/surface-lab.json --records samples/exploits --out chain.json
+PocketRoot chain approve chain.json --reason "ticket CHAIN-1" --confirm CHAIN-...
+PocketRoot chain run chain.json --campaign .pocketroot --evidence chain-evidence.json
+
 # scope -> read-only surface -> human approval with a configurable TTL -> gated dry run
 PocketRoot campaign init --scope samples/campaign/scope.json
 PocketRoot campaign arm
@@ -74,7 +81,9 @@ the final status, one audit line per capability request, and every emitted findi
 backend and writes evidence with the expected/observed outcome. The sample probes
 CVE-2021-41773's raw path traversal and fails unless the response contains `root:x:0:0`.
 
-`exploit run` is the effect layer: an exploit record executes ordered HTTP steps, captures
+`chain plan` matches observations (service/product/version or CVE) against exploit records
+and writes an ordered, digest-bound plan; `chain approve` authorises the plan once and
+`chain run` executes every step, checking STOP between steps. `exploit run` is the effect layer: an exploit record executes ordered HTTP steps, captures
 values such as a form build id, extracts command output between markers and writes
 `pocketroot.exploit.evidence.v1`. It always needs a campaign approval; the approval binds
 the record bytes, target and effective params. The sample executes a command through

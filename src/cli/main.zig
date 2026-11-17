@@ -76,6 +76,27 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "chain")) {
+        if (args.len < 3) {
+            try stdout.print("usage: chain plan|approve|run ...\n", .{});
+            return error.InvalidArguments;
+        }
+        if (std.mem.eql(u8, args[2], "plan")) {
+            try runChainPlanCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "approve")) {
+            try runChainApproveCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "run")) {
+            try runChainRunCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
+        try stdout.print("unknown chain command\n", .{});
+        return error.InvalidArguments;
+    }
+
     if (std.mem.eql(u8, args[1], "network")) {
         if (args.len != 2) {
             try stdout.print("usage: network\n", .{});
@@ -988,6 +1009,9 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                       Verify the gate and consume the approval
         \\  reproduce <record.json> [--evidence <path>] [--json]
         \\  exploit run <record.json> --campaign <dir> [--param k=v] [--evidence <path>] [--json]
+        \\  chain plan --observations <file> [--records <dir>] [--target <t>] [--out <plan.json>]
+        \\  chain approve <plan.json> --reason <text> --confirm <CHAIN-ID>
+        \\  chain run <plan.json> --campaign <dir> [--evidence <path>]
         \\  campaign approve-exploit <record.json> --reason <text> --confirm <CVE> [--param k=v]
         \\                       Run a PocketRoot reproduction record against its target
         \\  analyze [--json] <path>  Analyze a protocol file by extension
@@ -2491,6 +2515,8 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-repro") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "exploit run") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-exploit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "chain plan") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "chain run") != null);
 }
 
 const campaign_default_dir = ".pocketroot";
@@ -4076,4 +4102,418 @@ fn runExploitCommand(
         try writer.print("stop marker observed; no further exploit will start\n", .{});
     }
     if (!outcome.oracle_pass) return error.CommandFailed;
+}
+
+fn chainParamsHash(allocator: std.mem.Allocator, plan_data: []const u8) ![]u8 {
+    return PocketRoot.services.control.sha256Hex(allocator, plan_data);
+}
+
+fn runChainPlanCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var observations_path: ?[]const u8 = null;
+    var surface_path: ?[]const u8 = null;
+    var records_dir: []const u8 = "samples/exploits";
+    var out_path: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var json_output = false;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--observations") and index + 1 < raw.len) {
+            observations_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--surface") and index + 1 < raw.len) {
+            surface_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--records") and index + 1 < raw.len) {
+            records_dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--out") and index + 1 < raw.len) {
+            out_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--target") and index + 1 < raw.len) {
+            target = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            return error.InvalidArguments;
+        }
+    }
+    if (observations_path == null and surface_path == null) {
+        try writer.print("usage: chain plan --observations <file>|--surface <file> [--records <dir>] [--target <target>] [--out <file>]\n", .{});
+        return error.InvalidArguments;
+    }
+    var observations = if (surface_path) |path|
+        PocketRoot.services.chain.observationsFromSurface(allocator, io, path) catch |err| {
+            try writer.print("cannot load surface observations: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        }
+    else
+        PocketRoot.services.chain.loadObservations(allocator, io, observations_path.?) catch |err| {
+            try writer.print("cannot load observations: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    defer observations.deinit();
+    var chosen: ?PocketRoot.services.chain.Observation = null;
+    if (target) |wanted| {
+        for (observations.items) |item| {
+            if (std.mem.eql(u8, item.target, wanted)) chosen = item;
+        }
+    } else if (observations.items.len == 1) {
+        chosen = observations.items[0];
+    }
+    const observation = chosen orelse {
+        try writer.print("select one observation with --target; {d} available\n", .{observations.items.len});
+        return error.InvalidArguments;
+    };
+    var records = PocketRoot.services.chain.loadIndex(allocator, io, records_dir) catch |err| {
+        try writer.print("cannot load exploit records: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer records.deinit();
+    var plan = PocketRoot.services.chain.plan(allocator, &records, observation, campaignNow(io)) catch |err| {
+        try writer.print("no exploitable chain: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer plan.deinit();
+
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
+    try PocketRoot.services.chain.writePlanJson(&buffer.writer, &plan);
+    if (out_path) |path| {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buffer.written() }) catch |err| {
+            try writer.print("cannot write chain plan: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    }
+    if (json_output or out_path == null) try writer.writeAll(buffer.written());
+    try writer.print("chain {s}: {d} step(s) for {s}\n", .{ plan.id, plan.steps.len, plan.target });
+    for (plan.steps) |step| {
+        try writer.print("  {s} {s} <- {s}\n", .{ @tagName(step.effect), step.cve, step.record_path });
+    }
+}
+
+fn runChainApproveCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var plan_path: ?[]const u8 = null;
+    var reason: ?[]const u8 = null;
+    var confirm: ?[]const u8 = null;
+    var operator: []const u8 = "operator";
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--reason") and index + 1 < raw.len) {
+            reason = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--confirm") and index + 1 < raw.len) {
+            confirm = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--operator") and index + 1 < raw.len) {
+            operator = raw[index + 1];
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (plan_path != null) return error.InvalidArguments;
+            plan_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = plan_path orelse {
+        try writer.print("usage: chain approve <plan.json> --reason <text> --confirm <CHAIN-ID>\n", .{});
+        return error.InvalidArguments;
+    };
+    const why = reason orelse return error.InvalidArguments;
+    const typed = confirm orelse return error.InvalidArguments;
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024)) catch |err| {
+        try writer.print("cannot read chain plan: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var plan = PocketRoot.services.chain.loadPlan(allocator, io, path) catch |err| {
+        try writer.print("invalid chain plan: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer plan.deinit();
+    if (!std.mem.eql(u8, typed, plan.id)) {
+        try writer.print("confirmation does not match {s}; nothing approved\n", .{plan.id});
+        return error.InvalidArguments;
+    }
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    const now = campaignNow(io);
+    var approval = PocketRoot.services.control.createApproval(allocator, io, dir, &scope, .{
+        .action_id = plan.id,
+        .target = plan.target,
+        .technique = .exploit,
+        .params_hash = try chainParamsHash(allocator, data),
+    }, operator, why, now) catch |err| {
+        try writer.print("cannot approve {s}: {s}\n", .{ plan.id, @errorName(err) });
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "approve",
+        .action_id = approval.action_id,
+        .approval_id = approval.id,
+        .target = approval.target,
+        .technique = "exploit",
+        .result = "approved",
+        .detail = approval.reason,
+    }, now);
+    try writer.print("approved {s}: {d} step(s) on {s}\napproval {s} expires at {d}\n", .{
+        plan.id, plan.steps.len, plan.target, approval.id, approval.expires_at_unix,
+    });
+}
+
+fn runChainRunCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var plan_path: ?[]const u8 = null;
+    var campaign_dir: ?[]const u8 = null;
+    var evidence_path: ?[]const u8 = null;
+    var json_output = false;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--campaign") and index + 1 < raw.len) {
+            campaign_dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
+            evidence_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (plan_path != null) return error.InvalidArguments;
+            plan_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = plan_path orelse {
+        try writer.print("usage: chain run <plan.json> --campaign <dir> [--evidence <path>]\n", .{});
+        return error.InvalidArguments;
+    };
+    const dir = campaign_dir orelse {
+        try writer.print("chain run requires --campaign <dir> and an approval\n", .{});
+        return error.CommandFailed;
+    };
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024)) catch |err| {
+        try writer.print("cannot read chain plan: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var plan = PocketRoot.services.chain.loadPlan(allocator, io, path) catch |err| {
+        try writer.print("invalid chain plan: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer plan.deinit();
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    var action = ReproAction{
+        .action_id = try allocator.dupe(u8, plan.id),
+        .target = plan.target,
+        .params_hash = try chainParamsHash(allocator, data),
+    };
+    defer action.deinit(allocator);
+    const now = campaignNow(io);
+    PocketRoot.services.control.evaluate(allocator, io, dir, &scope, &state, .{
+        .action_id = action.action_id,
+        .target = action.target,
+        .technique = .exploit,
+        .params_hash = action.params_hash,
+    }, now) catch |err| {
+        try writer.print("denied: {s}\n", .{mapCampaignDenial(err)});
+        PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+            .event = "denied",
+            .action_id = action.action_id,
+            .target = action.target,
+            .technique = "exploit",
+            .result = @errorName(err),
+            .detail = mapCampaignDenial(err),
+        }, now) catch {};
+        return error.CommandFailed;
+    };
+    const approval_file = try PocketRoot.services.control.approvalPath(allocator, dir, action.action_id);
+    defer allocator.free(approval_file);
+    var approval = PocketRoot.services.control.loadApproval(allocator, io, approval_file) catch |err| {
+        try writer.print("cannot load approval: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    const approval_id = approval.id;
+    PocketRoot.services.control.consumeApproval(allocator, io, approval_file, now) catch |err| {
+        try writer.print("cannot consume approval: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "chain-start",
+        .action_id = action.action_id,
+        .approval_id = approval_id,
+        .target = action.target,
+        .technique = "exploit",
+        .result = "started",
+        .detail = plan.id,
+    }, now);
+
+    var evidence_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer evidence_buffer.deinit();
+    var chain_status: []const u8 = "succeeded";
+    var outputs: std.ArrayList(u8) = .empty;
+    defer outputs.deinit(allocator);
+    var step_report = std.Io.Writer.Allocating.init(allocator);
+    defer step_report.deinit();
+    var executed: usize = 0;
+    for (plan.steps, 0..) |step, step_index| {
+        if (PocketRoot.services.control.isStopped(allocator, io, dir)) {
+            chain_status = "stopped";
+            break;
+        }
+        const record_data = Io.Dir.cwd().readFileAlloc(io, step.record_path, allocator, .limited(256 * 1024)) catch |err| {
+            try writer.print("cannot read step record {s}: {s}\n", .{ step.record_path, @errorName(err) });
+            chain_status = "failed";
+            break;
+        };
+        defer allocator.free(record_data);
+        const digest = try PocketRoot.services.control.sha256Hex(allocator, record_data);
+        defer allocator.free(digest);
+        if (!std.mem.eql(u8, digest, step.digest)) {
+            try writer.print("step record changed since planning: {s}\n", .{step.record_path});
+            chain_status = "failed";
+            break;
+        }
+        var spec = PocketRoot.services.exploit.parseSpec(allocator, record_data) catch |err| {
+            try writer.print("invalid step record {s}: {s}\n", .{ step.record_path, @errorName(err) });
+            chain_status = "failed";
+            break;
+        };
+        defer spec.deinit();
+        spec.target = step.target;
+        var outcome = PocketRoot.services.exploit.run(allocator, io, &spec, spec.params) catch |err| {
+            try writer.print("step {s} failed: {s}\n", .{ step.cve, @errorName(err) });
+            PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+                .event = "chain-step",
+                .action_id = action.action_id,
+                .approval_id = approval_id,
+                .target = action.target,
+                .technique = "exploit",
+                .result = @errorName(err),
+                .detail = step.cve,
+            }, campaignNow(io)) catch {};
+            chain_status = "failed";
+            break;
+        };
+        defer outcome.deinit();
+        executed += 1;
+        try writer.print("step {d}/{d} {s} {s}: oracle={s}\n", .{
+            step_index + 1,                              plan.steps.len, @tagName(step.effect), step.cve,
+            if (outcome.oracle_pass) "pass" else "fail",
+        });
+        try outputs.appendSlice(allocator, outcome.output);
+        try outputs.append(allocator, '\n');
+        try step_report.writer.print("  {s} {s} oracle={s} bytes={d}\n", .{
+            @tagName(step.effect),                       step.cve,
+            if (outcome.oracle_pass) "pass" else "fail", outcome.output.len,
+        });
+        PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+            .event = "chain-step",
+            .action_id = action.action_id,
+            .approval_id = approval_id,
+            .target = action.target,
+            .technique = "exploit",
+            .result = if (outcome.oracle_pass) "succeeded" else "failed",
+            .detail = step.cve,
+        }, campaignNow(io)) catch {};
+        if (!outcome.oracle_pass) {
+            chain_status = "failed";
+            break;
+        }
+        if (PocketRoot.services.control.isStopped(allocator, io, dir)) {
+            chain_status = "stopped";
+            break;
+        }
+    }
+    try writer.print("chain {s}: {s} ({d}/{d} steps)\n", .{ plan.id, chain_status, executed, plan.steps.len });
+    try writer.writeAll(step_report.written());
+    try writer.print("output:\n{s}\n", .{outputs.items});
+    PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "chain-result",
+        .action_id = action.action_id,
+        .approval_id = approval_id,
+        .target = action.target,
+        .technique = "exploit",
+        .result = chain_status,
+        .detail = plan.id,
+    }, campaignNow(io)) catch {};
+
+    const Wire = struct {
+        schema: []const u8,
+        id: []const u8,
+        target: []const u8,
+        status: []const u8,
+        action_id: []const u8,
+        approval_id: []const u8,
+        executed: usize,
+        output: []const u8,
+        recorded_at_unix: i64,
+    };
+    var json: std.json.Stringify = .{
+        .writer = &evidence_buffer.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    json.write(Wire{
+        .schema = "pocketroot.chain.evidence.v1",
+        .id = plan.id,
+        .target = plan.target,
+        .status = chain_status,
+        .action_id = action.action_id,
+        .approval_id = approval_id,
+        .executed = executed,
+        .output = outputs.items,
+        .recorded_at_unix = campaignNow(io),
+    }) catch {};
+    try evidence_buffer.writer.writeByte('\n');
+    if (evidence_path) |file| {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = evidence_buffer.written() }) catch |err| {
+            try writer.print("cannot write chain evidence: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    }
+    if (json_output) try writer.writeAll(evidence_buffer.written());
+    if (!std.mem.eql(u8, chain_status, "succeeded")) return error.CommandFailed;
 }

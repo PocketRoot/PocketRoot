@@ -279,10 +279,11 @@ const verbs = [_]VerbInfo{
 };
 
 const option_keys = [_][]const u8{
-    "region",      "on_error",      "into",    "payload", "confirm",
-    "tag",         "note",          "path",    "timeout", "message",
-    "severity",    "target",        "method",  "body",    "expect_status",
-    "expect_body", "expect_absent", "headers", "data",    "expect_min_bytes",
+    "region",       "on_error",       "into",           "payload", "confirm",
+    "tag",          "note",           "path",           "timeout", "message",
+    "severity",     "target",         "method",         "body",    "expect_status",
+    "expect_body",  "expect_absent",  "headers",        "data",    "expect_min_bytes",
+    "capture_name", "capture_prefix", "capture_suffix",
 };
 
 fn verbInfo(name: []const u8) ?VerbInfo {

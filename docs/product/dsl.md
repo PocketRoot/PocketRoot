@@ -106,7 +106,7 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 |---|---|
 | `on_error` | `"abort"`, `"continue"` or `"retry(n)"`; retry reuses the workflow attempt counter |
 | `fail "message"` | a deliberate failure: emits an `error` finding, fails the step and stops the run |
-| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `headers`, `body`, `timeout`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `oracle`, `oracle_reason` |
+| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `headers`, `body`, `timeout`, `capture_name`, `capture_prefix`, `capture_suffix`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `captured`, `capture_found`, `oracle`, `oracle_reason` |
 | `net.udp` | one datagram: `target`, `data`, `timeout`, `expect_min_bytes`, `expect_body`, `expect_absent`; the result binds `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason` |
 | Scoping | `sig = ...` is local to the step; crossing steps requires `out <name>` |
 | Variables | A successful call binds its result payload as `name` and, for each `key=value` line, as `name.key` |
@@ -315,3 +315,38 @@ end
 
 The report includes `ratio` (response bytes divided by request bytes); a response at or
 above the requested minimum is only a hint, not proof of spoofability.
+
+## 13. Capturing a value
+
+`net.http` can capture a substring between two literal delimiters and expose it as
+`captured`. A later call can use the captured value as a bound field:
+
+```lua
+script "capture" do
+    use "pack.net"
+    cap probe = net.http
+    step "chain" do
+        first = probe {
+            target = "127.0.0.1:8080",
+            path = "/poison",
+            capture_name = "next",
+            capture_prefix = "next=",
+            capture_suffix = ";",
+        }
+        second = probe {
+            target = "127.0.0.1:8080",
+            path = first.captured,
+            expect_body = "ok",
+        }
+        out second
+    end
+end
+```
+
+The DSL captures values for scripts and simple chains. Multi-step exploit chains with
+command execution and effect evidence belong to `pocketroot.exploit.v1` and
+`chain plan/run`, which also carry the approval and record-digest checks.
+
+**Limit:** DSL strings have no escape syntax, so a delimiter that itself contains `"`
+cannot be expressed in a `capture_prefix`/`capture_suffix`; use the JSON exploit record
+for those protocols.
