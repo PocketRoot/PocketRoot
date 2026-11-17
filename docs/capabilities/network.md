@@ -90,6 +90,24 @@ Limits:
 - Emits host, endpoint and service observations; literal IPs are recorded as `address`,
   names as `hostname`.
 
+### 4.1 Raw probe: `net.http`
+
+`services/http_probe.zig` is the reproduction primitive behind the DSL's `net.http`:
+
+- Sends a raw HTTP/1.1 request with GET/POST/HEAD/PUT/DELETE, an unnormalised path, an
+  optional form body and `Connection: close`.
+- Caps the response at 256 KiB and the body at 64 KiB; accepts chunked and Content-Length
+  bodies.
+- No redirect following, no client path normalisation, no TLS (use `tls-inspect` for
+  certificates).
+- The spec carries an oracle: `expect_status`, `expect_body`, `expect_absent`. The
+  result is `oracle=pass|fail` plus `status`, `status_line`, `body_bytes` and a
+  shortened `body_prefix`.
+- Timeout 50-5000 ms. Path, target and method are validated before connecting.
+
+The live backend dispatches a JSON spec only when `--live` is set; without it the
+simulator echoes the payload, so a script can be reviewed offline but not claim a probe.
+
 ## 5. TLS: `tls-inspect` and `formats/tls_certificate.zig`
 
 `services/tls_inspect.zig`

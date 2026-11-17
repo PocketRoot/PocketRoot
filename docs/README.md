@@ -20,6 +20,7 @@ what the software does and how to verify it. Every behavioural claim is anchored
 | [protocols/README](protocols/README.md) | How to add a protocol plugin, including fuzz and smoke requirements |
 | [verification/README](verification/README.md) | How to run tests, fuzzing, smoke checks and catalogue validation |
 | [product/dsl](product/dsl.md) | Script DSL reference: grammar, execution model, capability binding |
+| [product/reproductions](product/reproductions.md) | Reproduction records, the `reproduce` runner, evidence and limits |
 | [product/firmware-triage](product/firmware-triage.md) | Firmware analysis: triage fields, Thumb disassembly, literal-pool xrefs |
 
 ## Scope

@@ -2,6 +2,7 @@ const std = @import("std");
 const capability = @import("../core/capability.zig");
 const fixtures = @import("fixtures.zig");
 const tcp_scan = @import("../services/tcp_scan.zig");
+const http_probe = @import("../services/http_probe.zig");
 
 pub const Backend = struct {
     supported: [std.meta.fields(capability.Kind).len]bool = @splat(false),
@@ -31,6 +32,9 @@ pub const Backend = struct {
                 const io = self.io orelse {
                     return capability.Result.init(allocator, .failed, "live scan unavailable");
                 };
+                if (http_probe.isHttpSpec(request.payload)) {
+                    return http_probe.execute(allocator, io, request.payload);
+                }
                 const text = try liveScan(allocator, io, request.payload);
                 defer allocator.free(text);
                 return capability.Result.init(allocator, .succeeded, text);

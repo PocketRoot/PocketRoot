@@ -44,6 +44,8 @@ pub const ActionSpec = struct {
     /// with a literal payload; unresolved paths fail the action.
     payload_ref: ?[]const u8 = null,
     active_authorized: bool = false,
+    /// A deliberate script failure: append an error finding, fail the step and stop the run.
+    fail: ?[]const u8 = null,
     emit: ?Emit = null,
     /// Binds this action's result payload (key=value lines) to a script variable.
     bind: ?[]const u8 = null,
@@ -166,6 +168,15 @@ pub const Engine = struct {
     fn executeAction(context: *anyopaque, action_id: []const u8, _: u16) !workflow.ActionState {
         const self: *Engine = @ptrCast(@alignCast(context));
         const spec = self.findAction(action_id) orelse return error.UnknownAction;
+        if (spec.fail) |message| {
+            try self.emitted.append(self.capabilities.allocator, .{
+                .severity = "error",
+                .message = message,
+                .payload = "",
+            });
+            self.last_status = .failed;
+            return .failed;
+        }
         if (spec.set_value) |value| {
             try self.storeVariable(spec.bind orelse action_id, value);
             self.last_status = .succeeded;

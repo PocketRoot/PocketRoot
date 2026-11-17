@@ -23,6 +23,7 @@ The I/O column states where the work actually happens.
 | `campaign surface` | any | filesystem (read-only) | `services/surface.zig` | 4096 actions, catalogue 64 MiB | expired scope: exit 1 |
 | `campaign approve <ACTION-ID>` | any | filesystem | `services/control.zig` | single-use, scope TTL, no `--yes` | wrong `--confirm` or disarmed: exit 1 |
 | `campaign run <ACTION-ID> --dry-run` | any | none | `services/control.zig` | approval consumed once, stop checked first | missing/used/expired approval or stopped: exit 1 |
+| `reproduce <record.json>` | any | real TCP | `services/http_probe.zig` + DSL | 256 KiB response, 50-5000 ms, HTTP only | failed oracle or invalid record: exit 1 |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |
 | `capture <s> <out> <comp>` | Windows only | real | `pktmon` start/stop/etl2pcap | 1-60 s, 1-64 MB, output <= 80 MiB | refuses overwrite, validates pcapng header and trailer |
@@ -62,6 +63,7 @@ The commands above are exercised by the smoke checks in `build.zig`.
 | `services/library.zig` | `pocketroot.library.v1` persistence | No CLI entry point |
 | `services/control.zig` | Scope, single-use approvals with configurable TTL, stop, hash-chained ledger | `campaign init|arm|stop|status|approve|run` |
 | `services/surface.zig` | Attack-surface report: access, capability, feasibility, candidate actions | `campaign surface` |
+| `services/http_probe.zig` | Raw HTTP/1.1 request and oracle for reproduction scripts | `net.http` via `script run --live`, `reproduce` |
 
 ## 4. Failure semantics
 

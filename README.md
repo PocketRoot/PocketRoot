@@ -41,6 +41,9 @@ PocketRoot device request infrared read --payload capture --audit audit.jsonl
 PocketRoot device serve --transport stdio --audit audit.jsonl
 PocketRoot audit audit.jsonl
 
+# raw HTTP reproduction: record -> rendered script -> live probe -> evidence
+PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --evidence repro.json
+
 # scope -> read-only surface -> human approval with a configurable TTL -> gated dry run
 PocketRoot campaign init --scope samples/campaign/scope.json
 PocketRoot campaign arm
@@ -60,6 +63,10 @@ exercises policy, locks, audit and framing rather than hardware.
 
 `script run` compiles the DSL and executes it against the simulated backend; it prints
 the final status, one audit line per capability request, and every emitted finding.
+
+`reproduce` renders a record's `{{target}}` into a DSL script, runs it with the live HTTP
+backend and writes evidence with the expected/observed outcome. The sample probes
+CVE-2021-41773's raw path traversal and fails unless the response contains `root:x:0:0`.
 
 `campaign surface` is read-only and needs no approval: it turns catalogued observations
 into ranked candidate actions and writes `.pocketroot/surface.json`. `campaign approve`

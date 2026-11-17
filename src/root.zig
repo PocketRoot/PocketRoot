@@ -45,6 +45,7 @@ pub const services = struct {
     pub const live_capture = @import("services/live_capture.zig");
     pub const library = @import("services/library.zig");
     pub const http_inspect = @import("services/http_inspect.zig");
+    pub const http_probe = @import("services/http_probe.zig");
     pub const tls_inspect = @import("services/tls_inspect.zig");
     pub const tcp_scan = @import("services/tcp_scan.zig");
     pub const workflow = @import("services/workflow.zig");
@@ -183,6 +184,7 @@ test {
         services.live_capture,
         services.library,
         services.http_inspect,
+        services.http_probe,
         services.tls_inspect,
         services.tcp_scan,
         services.workflow,

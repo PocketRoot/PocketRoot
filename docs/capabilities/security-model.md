@@ -128,4 +128,4 @@ execution is not. See [campaign](campaign.md) for the command flow and limits.
 | No OS permission checks | The kernel does not verify privileges such as those `pktmon` requires |
 | Campaign approvals are local files | A compromised campaign directory can mint approvals; operator identity is a recorded string, not an authenticated principal |
 | Campaign stop is software-only | No hardware inhibit line or watchdog exists; a real device must add both |
-| Network probes bypass the campaign gate | `tcp-scan`, `http-inspect` and `tls-inspect` predate the control plane and do not require an approval |
+| Network probes bypass the campaign gate | `tcp-scan`, `http-inspect`, `tls-inspect` and `net.http`/`reproduce` predate the control plane and do not require an approval |

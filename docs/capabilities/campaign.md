@@ -148,7 +148,8 @@ the sample uses a v2 entry.
 | No exploit executor or exploit knowledge base | no payload, session or post-exploitation code exists |
 | No transport authentication | approvals are local files; a compromised campaign directory can mint approvals |
 | Operator identity is a string | `--operator` is recorded, not authenticated; add TOTP/WebAuthn for real deployments |
-| Network probes are not routed through this gate | `tcp-scan`, `http-inspect` and `tls-inspect` predate the control plane and still bypass it |
+| Network probes are not routed through this gate | `tcp-scan`, `http-inspect`, `tls-inspect` and `net.http`/`reproduce` predate or bypass the control plane |
+| Reproduction exploit records are refused | `reproduce` rejects `kind: "exploit"`; a gated executor is still to be built |
 | Ledger is not signed | tamper-evident only |
 | No hardware stop | no inhibit line, no watchdog, no power cut |
 

@@ -62,6 +62,11 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "reproduce")) {
+        try runReproduceCommand(arena, init.io, stdout, args[2..]);
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "network")) {
         if (args.len != 2) {
             try stdout.print("usage: network\n", .{});
@@ -970,6 +975,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                       Single-use human approval with the scope's TTL
         \\  campaign run <ACTION-ID> --dry-run
         \\                       Verify the gate and consume the approval
+        \\  reproduce <record.json> [--evidence <path>] [--json]
+        \\                       Run a PocketRoot reproduction record against its target
         \\  analyze [--json] <path>  Analyze a protocol file by extension
         \\  analyze [--json] [--base <hex>] [--arch <thumb|arm>] --protocol firmware <path>
         \\                       Firmware triage with Thumb disassembly
@@ -1000,6 +1007,7 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot campaign approve ACTION-1 --reason "ticket SEC-1" --confirm ACTION-1
         \\  PocketRoot campaign run ACTION-1 --dry-run
         \\  PocketRoot campaign stop
+        \\  PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --evidence repro.json
         \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
         \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
@@ -2463,6 +2471,7 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign surface") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign stop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "reproduce <record.json>") != null);
 }
 
 const campaign_default_dir = ".pocketroot";
@@ -3233,4 +3242,167 @@ test "campaign surface, approval and stop gate a dry run" {
     defer std.testing.allocator.free(ledger);
     try std.testing.expect(std.mem.indexOf(u8, ledger, "\"event\":\"approve\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ledger, "\"event\":\"run-dry\"") != null);
+}
+
+const ReproductionWire = struct {
+    schema: []const u8 = "",
+    cve: []const u8 = "",
+    class: []const u8 = "",
+    oracle: []const u8 = "",
+    target: []const u8 = "",
+    script: []const u8 = "",
+    expected: []const u8 = "",
+    kind: []const u8 = "validate",
+};
+
+/// Runs a PocketRoot reproduction record: render {{target}}, execute the script live,
+/// print the probe output and optionally write a JSON evidence record.
+fn runReproduceCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var record_path: ?[]const u8 = null;
+    var evidence_path: ?[]const u8 = null;
+    var json_output = false;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
+            evidence_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (record_path != null) return error.InvalidArguments;
+            record_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = record_path orelse {
+        try writer.print("usage: reproduce <record.json> [--evidence <path>] [--json]\n", .{});
+        return error.InvalidArguments;
+    };
+
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024)) catch |err| {
+        try writer.print("cannot read reproduction record: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var parsed = std.json.parseFromSlice(ReproductionWire, allocator, data, .{
+        .ignore_unknown_fields = true,
+    }) catch {
+        try writer.print("invalid reproduction record: {s}\n", .{path});
+        return error.CommandFailed;
+    };
+    defer parsed.deinit();
+    const record = parsed.value;
+    if (!std.mem.eql(u8, record.schema, "pocketroot.reproduction.v1") or
+        record.cve.len == 0 or record.target.len == 0 or record.script.len == 0 or record.expected.len == 0)
+    {
+        try writer.print("reproduction record is missing schema, cve, target, script or expected\n", .{});
+        return error.CommandFailed;
+    }
+    // Exploitation is not a free-standing command: it must be approved through the
+    // campaign control plane. This build therefore refuses exploit records instead of
+    // silently running them without an approval.
+    if (std.mem.eql(u8, record.kind, "exploit")) {
+        try writer.print("exploit reproduction is disabled; approve it through the campaign control plane\n", .{});
+        return error.CommandFailed;
+    }
+
+    const record_dir = std.fs.path.dirname(path) orelse ".";
+    const script_path = try std.fs.path.join(allocator, &.{ record_dir, record.script });
+    defer allocator.free(script_path);
+    const source = Io.Dir.cwd().readFileAlloc(io, script_path, allocator, .limited(PocketRoot.services.script.max_script_bytes)) catch |err| {
+        try writer.print("cannot read reproduction script {s}: {s}\n", .{ script_path, @errorName(err) });
+        return error.CommandFailed;
+    };
+    defer allocator.free(source);
+    const rendered = std.mem.replaceOwned(u8, allocator, source, "{{target}}", record.target) catch return error.CommandFailed;
+    defer allocator.free(rendered);
+
+    const now = campaignNow(io);
+    const temp_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/reproduce-{d}-{s}.pk", .{ now, record.cve });
+    defer allocator.free(temp_path);
+    Io.Dir.cwd().createDirPath(io, ".zig-cache/tmp") catch {};
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = temp_path, .data = rendered }) catch |err| {
+        try writer.print("cannot stage reproduction script: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+
+    var capture = std.Io.Writer.Allocating.init(allocator);
+    defer capture.deinit();
+    const ok = runScriptCommand(allocator, io, Io.Dir.cwd(), &capture.writer, .{
+        .path = temp_path,
+        .live = true,
+    }) catch |err| {
+        try writer.print("reproduction aborted: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    try writer.writeAll(capture.written());
+
+    const observed = if (ok)
+        record.expected
+    else if (std.mem.eql(u8, record.expected, "vulnerable"))
+        "not_vulnerable"
+    else if (std.mem.eql(u8, record.expected, "fixed"))
+        "not_fixed"
+    else
+        "unexpected";
+
+    var evidence_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer evidence_buffer.deinit();
+    const Wire = struct {
+        schema: []const u8,
+        cve: []const u8,
+        class: []const u8,
+        oracle: []const u8,
+        target: []const u8,
+        expected: []const u8,
+        observed: []const u8,
+        script: []const u8,
+        status: []const u8,
+        recorded_at_unix: i64,
+    };
+    var json: std.json.Stringify = .{
+        .writer = &evidence_buffer.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    json.write(Wire{
+        .schema = "pocketroot.reproduction.evidence.v1",
+        .cve = record.cve,
+        .class = record.class,
+        .oracle = record.oracle,
+        .target = record.target,
+        .expected = record.expected,
+        .observed = observed,
+        .script = record.script,
+        .status = if (ok) "succeeded" else "failed",
+        .recorded_at_unix = now,
+    }) catch return error.CommandFailed;
+    try evidence_buffer.writer.writeByte('\n');
+
+    if (evidence_path) |evidence_file| {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = evidence_file, .data = evidence_buffer.written() }) catch |err| {
+            try writer.print("cannot write evidence: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    }
+    if (json_output) {
+        try writer.writeAll(evidence_buffer.written());
+    } else {
+        try writer.print("reproduction {s}: {s} (target {s}, expected {s}, observed {s})\n", .{
+            record.cve,
+            if (ok) "succeeded" else "failed",
+            record.target,
+            record.expected,
+            observed,
+        });
+    }
+    if (!ok) return error.CommandFailed;
 }

@@ -55,6 +55,7 @@ pub const verb_map = [_]VerbMapping{
     .{ .verb = "net.capture", .kind = .network, .operation = .capture },
     .{ .verb = "net.tls", .kind = .network, .operation = .analyze },
     .{ .verb = "net.scan", .kind = .network, .operation = .analyze },
+    .{ .verb = "net.http", .kind = .network, .operation = .analyze },
     .{ .verb = "fs.read", .kind = .storage, .operation = .read },
     .{ .verb = "fs.write", .kind = .storage, .operation = .write },
 };
@@ -146,6 +147,8 @@ const Compiler = struct {
         if (payload_literal == null and payload_ref == null and hasOption(call.options, "payload")) {
             return error.InvalidOptionValue;
         }
+        const is_http = std.mem.eql(u8, cap.verb, "net.http");
+        const http_payload = if (is_http) try httpSpec(self.a, call.options) else "";
         try self.addAction(
             id,
             .{
@@ -154,8 +157,8 @@ const Compiler = struct {
                 .kind = mapping.kind,
                 .operation = mapping.operation,
                 .region = try regionOption(cap, options.policy_region),
-                .payload = payload_literal orelse "",
-                .payload_ref = payload_ref,
+                .payload = if (is_http) http_payload else payload_literal orelse "",
+                .payload_ref = if (is_http) null else payload_ref,
                 .active_authorized = options.authorize_active,
                 .bind = bind,
             },
@@ -213,6 +216,16 @@ const Compiler = struct {
                         .operation = .observe,
                         .payload = spec.payload,
                         .emit = spec.emit,
+                    }, 1);
+                },
+                .fail => |message| {
+                    const id = try self.nextId("fail");
+                    try self.addAction(id, .{
+                        .id = id,
+                        .subject = subject,
+                        .kind = .storage,
+                        .operation = .observe,
+                        .fail = message,
                     }, 1);
                 },
                 .run => |run| try self.emitRun(source, subject, options, run),
@@ -374,6 +387,88 @@ fn allConnectors(connectors: []const script.Connector, expected: script.Connecto
 }
 
 const EmitSpec = struct { emit: automation.Emit, payload: []const u8 };
+
+/// The DSL's net.http call is compiled into a JSON request spec; the live backend
+/// parses it and runs services/http_probe. Keeping the spec in the payload means the
+/// capability kernel, audit and workflow stay unchanged.
+fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const target = stringOption(options, "target") orelse return error.InvalidOptionValue;
+    const method = stringOption(options, "method") orelse "GET";
+    const path = stringOption(options, "path") orelse "/";
+    const body = stringOption(options, "body") orelse "";
+
+    var timeout_ms: u32 = 2000;
+    if (numberOption(options, "timeout")) |value| {
+        timeout_ms = value;
+    } else if (stringOption(options, "timeout")) |text| {
+        timeout_ms = parseHttpDuration(text) orelse return error.InvalidOptionValue;
+    }
+    if (timeout_ms < 50 or timeout_ms > 5000) return error.InvalidOptionValue;
+
+    var expect_status: ?u16 = null;
+    if (numberOption(options, "expect_status")) |value| {
+        if (value > 65535) return error.InvalidOptionValue;
+        expect_status = @intCast(value);
+    } else if (stringOption(options, "expect_status")) |text| {
+        expect_status = std.fmt.parseInt(u16, text, 10) catch return error.InvalidOptionValue;
+    }
+
+    const Wire = struct {
+        kind: []const u8,
+        target: []const u8,
+        method: []const u8,
+        path: []const u8,
+        body: []const u8,
+        timeout_ms: u32,
+        expect_status: ?u16,
+        expect_body: []const u8,
+        expect_absent: []const u8,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{
+        .kind = "http",
+        .target = target,
+        .method = method,
+        .path = path,
+        .body = body,
+        .timeout_ms = timeout_ms,
+        .expect_status = expect_status,
+        .expect_body = stringOption(options, "expect_body") orelse "",
+        .expect_absent = stringOption(options, "expect_absent") orelse "",
+    }) catch return error.OutOfMemory;
+    return output.toOwnedSlice() catch error.OutOfMemory;
+}
+
+fn numberOption(options: []const script.Option, key: []const u8) ?u32 {
+    for (options) |option| {
+        if (!std.mem.eql(u8, option.key, key)) continue;
+        return switch (option.value) {
+            .number => |value| value,
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn parseHttpDuration(text: []const u8) ?u32 {
+    var digits: usize = 0;
+    while (digits < text.len and std.ascii.isDigit(text[digits])) digits += 1;
+    if (digits == 0) return null;
+    const value = std.fmt.parseInt(u32, text[0..digits], 10) catch return null;
+    const unit = text[digits..];
+    const multiplier: u32 = if (std.mem.eql(u8, unit, "ms"))
+        1
+    else if (std.mem.eql(u8, unit, "s"))
+        1000
+    else
+        return null;
+    return std.math.mul(u32, value, multiplier) catch null;
+}
 
 fn emitSpec(emit: script.Emit) ?EmitSpec {
     switch (emit) {
@@ -1021,4 +1116,34 @@ test "an unresolved reference field fails the step instead of sending an empty p
     try std.testing.expectEqual(workflow.Status.failed, try executor.run());
     // Only the first (successful) call reached the service.
     try std.testing.expectEqual(@as(usize, 1), harness.capabilities.audit.entries.items.len);
+}
+
+test "net.http compiles to a json request spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "http" do
+        \\    use "pack.net"
+        \\    cap probe = net.http
+        \\    step "probe" do
+        \\        response = probe {
+        \\            target = "127.0.0.1:8080",
+        \\            method = "GET",
+        \\            path = "/cgi-bin/.%2e/etc/passwd",
+        \\            expect_status = 200,
+        \\            expect_body = "root:x:0:0",
+        \\        }
+        \\        if response.oracle ~= "pass" then
+        \\            fail "oracle failed"
+        \\        end
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    try std.testing.expect(compiled.actions.len >= 2);
+    const payload = compiled.actions[0].payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"http\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"target\":\"127.0.0.1:8080\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"expect_status\":200") != null);
+    try std.testing.expect(compiled.actions[1].fail != null);
 }

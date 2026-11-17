@@ -119,7 +119,7 @@ const keywords = [_][]const u8{
     "script", "do",    "end",  "use",     "budget", "cap",     "step",
     "emit",   "stop",  "info", "warning", "error",  "finding", "from_policy",
     "true",   "false", "if",   "then",    "elseif", "else",    "for",
-    "out",    "and",   "or",   "not",     "run",
+    "out",    "and",   "or",   "not",     "run",    "fail",
 };
 
 fn keywordKind(text: []const u8) bool {
@@ -222,6 +222,7 @@ pub const Stmt = union(enum) {
     call: Call,
     assign: Assign,
     emit: Emit,
+    fail: []const u8,
     stop: void,
     out: Out,
     run: Run,
@@ -271,13 +272,16 @@ const verbs = [_]VerbInfo{
     .{ .name = "net.capture", .active = false },
     .{ .name = "net.tls", .active = false },
     .{ .name = "net.scan", .active = false },
+    .{ .name = "net.http", .active = false },
     .{ .name = "fs.read", .active = false },
     .{ .name = "fs.write", .active = true },
 };
 
 const option_keys = [_][]const u8{
-    "region", "on_error", "into",    "payload", "confirm",  "tag",
-    "note",   "path",     "timeout", "message", "severity",
+    "region",      "on_error",      "into",   "payload", "confirm",
+    "tag",         "note",          "path",   "timeout", "message",
+    "severity",    "target",        "method", "body",    "expect_status",
+    "expect_body", "expect_absent",
 };
 
 fn verbInfo(name: []const u8) ?VerbInfo {
@@ -294,7 +298,7 @@ const packs = [_]PackEntry{
     .{ .name = "pack.rf", .verbs = &.{ "subghz.read", "subghz.transmit", "lfrfid.read", "ibutton.read" } },
     .{ .name = "pack.nfc", .verbs = &.{ "nfc.read", "nfc.emulate" } },
     .{ .name = "pack.ir", .verbs = &.{ "ir.receive", "ir.transmit" } },
-    .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan" } },
+    .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan", "net.http" } },
     .{ .name = "pack.fs", .verbs = &.{ "fs.read", "fs.write" } },
 };
 
@@ -618,6 +622,15 @@ const Parser = struct {
         if (isKw(token, "stop")) {
             _ = self.advance();
             return .{ .stop = {} };
+        }
+        if (isKw(token, "fail")) {
+            _ = self.advance();
+            const message = try self.expectKind(.string);
+            if (message.text.len == 0 or message.text.len > 512) {
+                self.note(message.line, "fail message");
+                return error.InvalidScriptName;
+            }
+            return .{ .fail = message.text };
         }
         if (isKw(token, "out")) {
             _ = self.advance();
@@ -1252,6 +1265,7 @@ fn validateStmts(
                 try validateCall(parser, script, assign.call, visible.items);
             },
             .emit => |emit| try validateEmit(parser, emit, visible.items),
+            .fail => {},
             .stop => {},
             .out => |out| {
                 if (!nameIn(visible.items, out.name)) {
@@ -1771,4 +1785,29 @@ test "rejects a region that is neither a string nor from_policy" {
         \\    end
         \\end
     ));
+}
+
+test "parses net.http and fail" {
+    var source = try parse(std.testing.allocator,
+        \\script "http" do
+        \\    use "pack.net"
+        \\    cap probe = net.http
+        \\    step "probe" do
+        \\        response = probe { target = "127.0.0.1:8080", path = "/", expect_status = 200 }
+        \\        if response.oracle ~= "pass" then
+        \\            fail "oracle failed"
+        \\        end
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    try std.testing.expectEqualStrings("net.http", source.caps[0].verb);
+    const fail_stmt = switch (source.steps[0].body[1]) {
+        .if_stmt => |branch| branch.then_body[0],
+        else => return error.UnexpectedToken,
+    };
+    switch (fail_stmt) {
+        .fail => |message| try std.testing.expectEqualStrings("oracle failed", message),
+        else => return error.UnexpectedToken,
+    }
 }

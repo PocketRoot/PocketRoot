@@ -77,7 +77,7 @@ Every verb becomes a `capability.Request` (see
 
 | DSL verb | Kind and operation | Active authorisation |
 |---|---|---|
-| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
+| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `net.http`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
 | `subghz.transmit` | `subghz` + `transmit` | yes, with matching region |
 | `ir.transmit` | `infrared` + `transmit` | yes |
 | `nfc.emulate` | `nfc` + `emulate` | yes |
@@ -94,7 +94,7 @@ one pack:
 | `pack.rf` | `subghz.read`, `subghz.transmit`, `lfrfid.read`, `ibutton.read` |
 | `pack.nfc` | `nfc.read`, `nfc.emulate` |
 | `pack.ir` | `ir.receive`, `ir.transmit` |
-| `pack.net` | `net.capture`, `net.tls`, `net.scan` |
+| `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http` |
 | `pack.fs` | `fs.read`, `fs.write` |
 
 A `cap` whose pack was not imported fails with `PackNotImported`; an unknown pack fails
@@ -105,6 +105,8 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 | Item | Behaviour |
 |---|---|
 | `on_error` | `"abort"`, `"continue"` or `"retry(n)"`; retry reuses the workflow attempt counter |
+| `fail "message"` | a deliberate failure: emits an `error` finding, fails the step and stops the run |
+| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `body`, `timeout`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `oracle`, `oracle_reason` |
 | Scoping | `sig = ...` is local to the step; crossing steps requires `out <name>` |
 | Variables | A successful call binds its result payload as `name` and, for each `key=value` line, as `name.key` |
 | References | `payload`, `severity`, `message`, `tag` and `note` accept a variable reference. The root must be visible at parse time; a path that is visible but has no runtime field fails the step with `UnresolvedReference` instead of sending or emitting an empty value |
@@ -229,7 +231,7 @@ PocketRootVulnerabilityDb/tools/Invoke-CapabilityCheck.ps1 -Live -WithDocker
 
 ### Live scanning
 
-`net.scan` reads the recorded observation unless the run asks for a probe:
+`net.scan` reads the recorded observation unless the run asks for a probe; `net.http` always needs `--live`:
 
 ```powershell
 zig-out/bin/PocketRoot script run --live samples/scripts/live-scan.pk
@@ -253,3 +255,35 @@ Live mode uses the TCP scanner, so protocol probes only run for the ports it kno
 (80, 443, 6379, 8080, 3306, 5432 and the other documented defaults). A host mapped to an
 unusual port connects successfully but reports no product or version. `--dump-vars`
 prints every bound variable and is intended for diagnostics, not for evidence.
+
+## 11. Raw HTTP reproduction scripts
+
+`net.http` sends the request bytes unchanged: no client normalisation, no redirect
+following. A call site carries the request and its oracle:
+
+```lua
+script "cve-2021-41773-probe" do
+    use "pack.net"
+    cap probe = net.http
+
+    step "probe" do
+        response = probe {
+            target = "127.0.0.1:8080",
+            method = "GET",
+            path = "/cgi-bin/.%2e/.%2e/.%2e/.%2e/etc/passwd",
+            expect_status = 200,
+            expect_body = "root:x:0:0",
+        }
+        if response.oracle ~= "pass" then
+            fail "CVE-2021-41773 was not observed"
+        end
+        emit finding { severity = "critical", message = "path traversal returned /etc/passwd" }
+    end
+end
+```
+
+The backend returns `succeeded` with `oracle=pass|fail` so the script can decide with
+`fail`; transport and parse errors return `failed`. `fail` appends an error finding and
+ends the workflow as failed. The `reproduce` command renders `{{target}}`, runs a script
+live and writes `pocketroot.reproduction.evidence.v1`; see
+[reproductions](reproductions.md).

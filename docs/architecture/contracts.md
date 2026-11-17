@@ -192,6 +192,18 @@ Capability command payload (`src/device/command.zig`):
 
 A response payload starts with the `capability.Status` byte followed by the data.
 
+### 4.1 `net.http` request spec
+
+The DSL compiles a `net.http` call into a JSON payload carried by the network capability:
+
+```json
+{"kind":"http","target":"127.0.0.1:8080","method":"GET","path":"/cgi-bin/.%2e/etc/passwd","body":"","timeout_ms":2000,"expect_status":200,"expect_body":"root:x:0:0","expect_absent":""}
+```
+
+The live backend dispatches it to `services/http_probe.zig`; the capability kernel, audit
+subject and workflow are unchanged. The probe result is a key=value payload with
+`status`, `status_line`, `body_bytes`, `body_prefix`, `oracle` and `oracle_reason`.
+
 ## 5. Schema identifiers
 
 | Schema | Location | Purpose |
@@ -209,6 +221,8 @@ A response payload starts with the `capability.Status` byte followed by the data
 | `pocketroot.campaign.v1` | `services/control.zig` | Campaign phase and action count |
 | `pocketroot.ledger.v1` | `services/control.zig` | Hash-chained campaign ledger entry |
 | `pocketroot.surface.v1` | `services/surface.zig` | Attack-surface report and candidate actions |
+| `pocketroot.reproduction.v1` | `samples/reproductions/*/record.json` | One reproduction record consumed by `reproduce` |
+| `pocketroot.reproduction.evidence.v1` | `cli/main.zig` | One reproduction run and its observed outcome |
 
 The schema identifier is the compatibility boundary. Changing fields without bumping the
 version breaks consumers; `UnsupportedCatalogSchema` reports a mismatch.
