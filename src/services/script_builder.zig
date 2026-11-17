@@ -59,6 +59,7 @@ pub const verb_map = [_]VerbMapping{
     .{ .verb = "net.udp", .kind = .network, .operation = .analyze },
     .{ .verb = "exploit.plan", .kind = .exploit, .operation = .analyze },
     .{ .verb = "exploit.execute", .kind = .exploit, .operation = .manage },
+    .{ .verb = "exploit.adaptive", .kind = .exploit, .operation = .manage },
     .{ .verb = "fs.read", .kind = .storage, .operation = .read },
     .{ .verb = "fs.write", .kind = .storage, .operation = .write },
 };
@@ -154,6 +155,7 @@ const Compiler = struct {
         const is_udp = std.mem.eql(u8, cap.verb, "net.udp");
         const is_exploit_plan = std.mem.eql(u8, cap.verb, "exploit.plan");
         const is_exploit_execute = std.mem.eql(u8, cap.verb, "exploit.execute");
+        const is_exploit_adaptive = std.mem.eql(u8, cap.verb, "exploit.adaptive");
         const http_compiled = if (is_http)
             try httpSpec(self.a, call.options)
         else
@@ -164,6 +166,8 @@ const Compiler = struct {
             try exploitPlanSpec(self.a, call.options)
         else if (is_exploit_execute)
             try exploitExecuteSpec(self.a, call.options)
+        else if (is_exploit_adaptive)
+            try exploitAdaptiveSpec(self.a, call.options)
         else
             http_compiled.payload;
         try self.addAction(
@@ -174,8 +178,8 @@ const Compiler = struct {
                 .kind = mapping.kind,
                 .operation = mapping.operation,
                 .region = try regionOption(cap, options.policy_region),
-                .payload = if (is_http or is_udp or is_exploit_plan or is_exploit_execute) http_payload else payload_literal orelse "",
-                .payload_ref = if (is_http or is_udp or is_exploit_plan or is_exploit_execute) null else payload_ref,
+                .payload = if (is_http or is_udp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) http_payload else payload_literal orelse "",
+                .payload_ref = if (is_http or is_udp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) null else payload_ref,
                 .path_ref = http_compiled.path_ref,
                 .active_authorized = options.authorize_active,
                 .bind = bind,
@@ -600,6 +604,30 @@ fn exploitExecuteSpec(a: Allocator, options: []const script.Option) Error![]cons
         .kind = "exploit",
         .mode = "run",
         .plan = plan,
+        .campaign = campaign,
+    }) catch return error.OutOfMemory;
+    return output.toOwnedSlice() catch error.OutOfMemory;
+}
+
+fn exploitAdaptiveSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const goal = (try literalString(options, "goal")) orelse return error.InvalidOptionValue;
+    const campaign = (try literalString(options, "campaign")) orelse return error.InvalidOptionValue;
+    const Wire = struct {
+        kind: []const u8,
+        mode: []const u8,
+        goal: []const u8,
+        campaign: []const u8,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{
+        .kind = "exploit",
+        .mode = "adaptive",
+        .goal = goal,
         .campaign = campaign,
     }) catch return error.OutOfMemory;
     return output.toOwnedSlice() catch error.OutOfMemory;
@@ -1430,4 +1458,23 @@ test "exploit.execute compiles into an active kernel run spec" {
     try std.testing.expectEqual(capability.Kind.exploit, compiled.actions[0].kind);
     try std.testing.expectEqual(capability.Operation.manage, compiled.actions[0].operation);
     try std.testing.expect(std.mem.indexOf(u8, compiled.actions[0].payload, "\"mode\":\"run\"") != null);
+}
+
+test "exploit.adaptive compiles into an active adaptive spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "adaptive" do
+        \\    use "pack.exploit"
+        \\    cap adv = exploit.adaptive
+        \\    step "run" do
+        \\        result = adv { goal = "goal.json", campaign = ".pocketroot" }
+        \\        out result
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    try std.testing.expectEqual(capability.Kind.exploit, compiled.actions[0].kind);
+    try std.testing.expectEqual(capability.Operation.manage, compiled.actions[0].operation);
+    try std.testing.expect(std.mem.indexOf(u8, compiled.actions[0].payload, "\"mode\":\"adaptive\"") != null);
 }

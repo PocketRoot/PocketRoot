@@ -22,6 +22,7 @@ what the software does and how to verify it. Every behavioural claim is anchored
 | [product/dsl](product/dsl.md) | Script DSL reference: grammar, execution model, capability binding |
 | [product/reproductions](product/reproductions.md) | Reproduction records, the `reproduce` runner, evidence and limits |
 | [product/exploits](product/exploits.md) | Exploit records, effect execution, approval, evidence and limits |
+| [product/adaptive](product/adaptive.md) | Output-driven modular goals: facts, captures, selection and boundaries |
 | [product/firmware-triage](product/firmware-triage.md) | Firmware analysis: triage fields, Thumb disassembly, literal-pool xrefs |
 
 ## Scope

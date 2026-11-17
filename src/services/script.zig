@@ -276,6 +276,7 @@ const verbs = [_]VerbInfo{
     .{ .name = "net.udp", .active = false },
     .{ .name = "exploit.plan", .active = false },
     .{ .name = "exploit.execute", .active = true },
+    .{ .name = "exploit.adaptive", .active = true },
     .{ .name = "fs.read", .active = false },
     .{ .name = "fs.write", .active = true },
 };
@@ -286,7 +287,7 @@ const option_keys = [_][]const u8{
     "severity",     "target",         "method",         "body",         "expect_status",
     "expect_body",  "expect_absent",  "headers",        "data",         "expect_min_bytes",
     "capture_name", "capture_prefix", "capture_suffix", "observations", "surface",
-    "records",      "plan",           "campaign",
+    "records",      "plan",           "campaign",       "goal",
 };
 
 fn verbInfo(name: []const u8) ?VerbInfo {
@@ -305,7 +306,7 @@ const packs = [_]PackEntry{
     .{ .name = "pack.ir", .verbs = &.{ "ir.receive", "ir.transmit" } },
     .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan", "net.http", "net.udp" } },
     .{ .name = "pack.fs", .verbs = &.{ "fs.read", "fs.write" } },
-    .{ .name = "pack.exploit", .verbs = &.{ "exploit.plan", "exploit.execute" } },
+    .{ .name = "pack.exploit", .verbs = &.{ "exploit.plan", "exploit.execute", "exploit.adaptive" } },
 };
 
 pub fn packKnown(name: []const u8) bool {

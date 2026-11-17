@@ -95,7 +95,7 @@ one pack:
 | `pack.nfc` | `nfc.read`, `nfc.emulate` |
 | `pack.ir` | `ir.receive`, `ir.transmit` |
 | `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp` |
-| `pack.exploit` | `exploit.plan`, `exploit.execute` |
+| `pack.exploit` | `exploit.plan`, `exploit.execute`, `exploit.adaptive` |
 | `pack.fs` | `fs.read`, `fs.write` |
 
 A `cap` whose pack was not imported fails with `PackNotImported`; an unknown pack fails
@@ -111,6 +111,7 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 | `net.udp` | one datagram: `target`, `data`, `timeout`, `expect_min_bytes`, `expect_body`, `expect_absent`; the result binds `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason` |
 | `exploit.plan` | passive chain analysis: `observations` or `surface`, `records`, `target`; the result binds the `pocketroot.chain.v1` JSON |
 | `exploit.execute` | active, campaign-gated chain execution: `plan`, `campaign`; the result binds `pocketroot.chain.evidence.v1` |
+| `exploit.adaptive` | active, campaign-gated output-driven goal: `goal`, `campaign`; the result binds `pocketroot.adaptive.evidence.v1` |
 | Scoping | `sig = ...` is local to the step; crossing steps requires `out <name>` |
 | Variables | A successful call binds its result payload as `name` and, for each `key=value` line, as `name.key` |
 | References | `payload`, `severity`, `message`, `tag` and `note` accept a variable reference. The root must be visible at parse time; a path that is visible but has no runtime field fails the step with `UnresolvedReference` instead of sending or emitting an empty value |
@@ -399,3 +400,23 @@ end
 
 The audit line is `exploit manage`; a missing/used/expired approval is audited as
 `denied`, not as a successful script. The kernel does not mint approvals.
+
+### 14.2 Adaptive goals
+
+`exploit.adaptive` executes a `pocketroot.adaptive.v1` goal. Modules declare
+`requires` facts, `inputs` and `outputs`; the runner selects the next module from the
+facts produced by the previous output instead of following a fixed step list.
+
+```lua
+script "adaptive" do
+    use "pack.exploit"
+    cap adv = exploit.adaptive
+    step "run" do
+        result = adv { goal = "goal.json", campaign = ".pocketroot" }
+        out result
+    end
+end
+```
+
+It is active, so run with `--authorize-active`; the handler still requires a live
+`campaign approve-adaptive` approval. See [adaptive](adaptive.md).

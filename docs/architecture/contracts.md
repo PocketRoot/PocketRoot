@@ -236,6 +236,21 @@ digest. `chain run` re-hashes each record before executing it. The approval bind
 plan bytes (not each record), so one approval covers the chain while any plan or record
 change invalidates it. STOP is checked before and after every step.
 
+### 4.5 `pocketroot.adaptive.v1`
+
+```json
+{"schema":"pocketroot.adaptive.v1","id":"ADAPT-X","target":"127.0.0.1:80","goal":{"contains":"uid="},"max_steps":4,"facts":[{"name":"service","value":"http"}],"modules":[{"id":"discover","record":"a.json","requires":[{"fact":"service","equals":"http"}],"inputs":[{"name":"file","default":"/etc/passwd"}],"outputs":[{"fact":"route","capture":"route"}],"priority":0}]}
+```
+
+The approval binds the goal bytes and the digest of every referenced record. The runner
+recomputes the hash before execution. A `requires` predicate compares one fact with an
+`equals` value; an `output` copies a record capture into a fact; an `input` binds a
+record template parameter from a fact or a default. This is the adaptive kernel payload:
+
+```json
+{"kind":"exploit","mode":"adaptive","goal":"goal.json","campaign":".pocketroot"}
+```
+
 ## 5. Schema identifiers
 
 | Schema | Location | Purpose |
@@ -260,6 +275,8 @@ change invalidates it. STOP is checked before and after every step.
 | `pocketroot.observations.v1` | `samples/observations/*.json` | Target fingerprint input to chain planning |
 | `pocketroot.chain.v1` | `chain plan` | Ordered, digest-bound exploit plan for one target |
 | `pocketroot.chain.evidence.v1` | `chain run` | One chain execution and its per-step outputs |
+| `pocketroot.adaptive.v1` | `chain adaptive` | Modular goal: facts, requires, inputs and captures |
+| `pocketroot.adaptive.evidence.v1` | `chain adaptive` | Actual adaptive path, outputs and final facts |
 
 The schema identifier is the compatibility boundary. Changing fields without bumping the
 version breaks consumers; `UnsupportedCatalogSchema` reports a mismatch.

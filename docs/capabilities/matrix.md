@@ -31,6 +31,8 @@ The I/O column states where the work actually happens.
 | `chain approve <plan.json>` | any | filesystem | `services/control.zig` | plan bytes + target, one approval | disarmed or outside scope: exit 1 |
 | `chain run <plan.json>` | any | real TCP | `services/chain.zig` + `exploit.zig` | STOP before/after each step, record digest check | changed record/plan or failed step: exit 1 |
 | `exploit.execute` (DSL) | active | real TCP | `chain_exec.zig` | kernel active gate + campaign approval | no/used approval: audited denied |
+| `chain adaptive <goal.json>` | any | real TCP | `adaptive.zig` | one approval, max_steps, STOP per module | no eligible module or unmet goal: exit 1 |
+| `exploit.adaptive` (DSL) | active | real TCP | `adaptive.zig` | kernel active gate + adaptive approval | no/used approval: audited denied |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |
 | `capture <s> <out> <comp>` | Windows only | real | `pktmon` start/stop/etl2pcap | 1-60 s, 1-64 MB, output <= 80 MiB | refuses overwrite, validates pcapng header and trailer |
@@ -76,6 +78,7 @@ The commands above are exercised by the smoke checks in `build.zig`.
 | `services/chain.zig` | Observation-to-record matching and digest-bound chain plans | `chain plan/run`, `exploit.plan` |
 | `services/exploit_plan.zig` | Kernel-side passive chain analysis over observations/surface | `exploit.plan` (DSL), `device request exploit analyze` |
 | `services/chain_exec.zig` | Campaign-gated chain execution shared by kernel and CLI | `exploit.execute`, `chain run` |
+| `services/adaptive.zig` | Output-driven modular goals: facts, captures and dynamic selection | `chain adaptive`, `exploit.adaptive` |
 
 ## 4. Failure semantics
 

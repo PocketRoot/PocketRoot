@@ -74,6 +74,10 @@ PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json \
 PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json \
     --campaign .pocketroot --param command=id
 
+# one approval for an output-driven adaptive goal
+PocketRoot campaign approve-adaptive goal.json --reason "ticket ADAPT-1" --confirm ADAPT-DEMO
+PocketRoot chain adaptive goal.json --campaign .pocketroot
+
 # one approval for a detected chain
 PocketRoot chain plan --observations samples/observations/lab.json --out chain.json
 PocketRoot chain approve chain.json --reason "ticket CHAIN-1" --confirm CHAIN-...
@@ -146,6 +150,13 @@ Changing the command, file, target or any step invalidates the approval. See
 digest, checks STOP before and after each step, consumes the approval before the first
 step and writes `chain-start`, `chain-step` and `chain-result`. This is the single
 approval path for automatic multi-step exploitation.
+
+### 5.4 Adaptive approvals
+
+`campaign approve-adaptive` binds the goal bytes and every referenced record digest.
+`chain adaptive` / `exploit.adaptive` consume the approval before the first module,
+check STOP between modules and record the actual runtime path. The approval does not
+contain a step list; it authorises the module set, target and goal.
 
 ## 6. Ledger
 

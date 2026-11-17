@@ -93,6 +93,10 @@ fn run(init: std.process.Init) !void {
             try runChainRunCommand(arena, init.io, stdout, args[3..]);
             return;
         }
+        if (std.mem.eql(u8, args[2], "adaptive")) {
+            try runAdaptiveCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
         try stdout.print("unknown chain command\n", .{});
         return error.InvalidArguments;
     }
@@ -1012,6 +1016,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  chain plan --observations <file> [--records <dir>] [--target <t>] [--out <plan.json>]
         \\  chain approve <plan.json> --reason <text> --confirm <CHAIN-ID>
         \\  chain run <plan.json> --campaign <dir> [--evidence <path>]
+        \\  chain adaptive <goal.json> --campaign <dir> [--evidence <path>]
+        \\  campaign approve-adaptive <goal.json> --reason <text> --confirm <GOAL-ID>
         \\  campaign approve-exploit <record.json> --reason <text> --confirm <CVE> [--param k=v]
         \\                       Run a PocketRoot reproduction record against its target
         \\  analyze [--json] <path>  Analyze a protocol file by extension
@@ -2517,6 +2523,8 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-exploit") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "chain plan") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "chain run") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "chain adaptive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-adaptive") != null);
 }
 
 const campaign_default_dir = ".pocketroot";
@@ -2575,6 +2583,7 @@ fn runCampaignCommand(
     if (std.mem.eql(u8, sub, "approve")) return runCampaignApprove(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "approve-repro")) return runCampaignApproveRepro(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "approve-exploit")) return runCampaignApproveExploit(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "approve-adaptive")) return runCampaignApproveAdaptive(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "run")) return runCampaignRun(allocator, io, writer, raw[1..]);
     try writer.print("unknown campaign command: {s}\n", .{sub});
     try printCampaignUsage(writer);
@@ -4516,4 +4525,213 @@ fn runChainRunCommand(
     }
     if (json_output) try writer.writeAll(evidence_buffer.written());
     if (!std.mem.eql(u8, chain_status, "succeeded")) return error.CommandFailed;
+}
+
+fn runCampaignApproveAdaptive(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var goal_path: ?[]const u8 = null;
+    var reason: ?[]const u8 = null;
+    var confirm: ?[]const u8 = null;
+    var operator: []const u8 = "operator";
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--reason") and index + 1 < raw.len) {
+            reason = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--confirm") and index + 1 < raw.len) {
+            confirm = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--operator") and index + 1 < raw.len) {
+            operator = raw[index + 1];
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (goal_path != null) return error.InvalidArguments;
+            goal_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = goal_path orelse {
+        try writer.print("usage: campaign approve-adaptive <goal.json> --reason <text> --confirm <GOAL-ID>\n", .{});
+        return error.InvalidArguments;
+    };
+    const why = reason orelse return error.InvalidArguments;
+    const typed = confirm orelse return error.InvalidArguments;
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024)) catch |err| {
+        try writer.print("cannot read adaptive goal: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var goal = PocketRoot.services.adaptive.parseGoal(allocator, data) catch {
+        try writer.print("invalid adaptive goal: {s}\n", .{path});
+        return error.CommandFailed;
+    };
+    defer goal.deinit();
+    if (!std.mem.eql(u8, typed, goal.id)) {
+        try writer.print("confirmation does not match {s}; nothing approved\n", .{goal.id});
+        return error.InvalidArguments;
+    }
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    const action_id = try std.fmt.allocPrint(allocator, "ADAPT-{s}", .{goal.id});
+    defer allocator.free(action_id);
+    const params_hash = PocketRoot.services.adaptive.goalHash(allocator, io, data, &goal) catch |err| {
+        try writer.print("cannot bind adaptive goal: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(params_hash);
+    const now = campaignNow(io);
+    var approval = PocketRoot.services.control.createApproval(allocator, io, dir, &scope, .{
+        .action_id = action_id,
+        .target = goal.target,
+        .technique = .exploit,
+        .params_hash = params_hash,
+    }, operator, why, now) catch |err| {
+        try writer.print("cannot approve {s}: {s}\n", .{ action_id, @errorName(err) });
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "approve",
+        .action_id = approval.action_id,
+        .approval_id = approval.id,
+        .target = approval.target,
+        .technique = "exploit",
+        .result = "approved",
+        .detail = approval.reason,
+    }, now);
+    try writer.print("approved {s}: {s} on {s}\napproval {s} expires at {d}\n", .{
+        action_id, goal.id, goal.target, approval.id, approval.expires_at_unix,
+    });
+}
+
+fn runAdaptiveCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var goal_path: ?[]const u8 = null;
+    var campaign_dir: ?[]const u8 = null;
+    var evidence_path: ?[]const u8 = null;
+    var json_output = false;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--campaign") and index + 1 < raw.len) {
+            campaign_dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
+            evidence_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (goal_path != null) return error.InvalidArguments;
+            goal_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = goal_path orelse {
+        try writer.print("usage: chain adaptive <goal.json> --campaign <dir> [--evidence <path>]\n", .{});
+        return error.InvalidArguments;
+    };
+    const dir = campaign_dir orelse {
+        try writer.print("chain adaptive requires --campaign <dir> and an approval\n", .{});
+        return error.CommandFailed;
+    };
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024)) catch |err| {
+        try writer.print("cannot read adaptive goal: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var goal = PocketRoot.services.adaptive.parseGoal(allocator, data) catch {
+        try writer.print("invalid adaptive goal: {s}\n", .{path});
+        return error.CommandFailed;
+    };
+    defer goal.deinit();
+    var execution = PocketRoot.services.adaptive.run(allocator, io, data, &goal, dir) catch |err| {
+        try writer.print("adaptive run refused: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer execution.deinit();
+
+    try writer.print("adaptive {s}: {s} on {s}\n", .{ goal.id, execution.status, goal.target });
+    for (execution.steps) |step| {
+        try writer.print("  {s} {s} oracle={s}\n", .{
+            step.module_id, step.cve, if (step.oracle_pass) "pass" else "fail",
+        });
+    }
+    try writer.print("facts:\n{s}\n", .{execution.facts_output});
+
+    var evidence = std.Io.Writer.Allocating.init(allocator);
+    defer evidence.deinit();
+    const StepWire = struct {
+        module: []const u8,
+        cve: []const u8,
+        oracle: []const u8,
+        output: []const u8,
+    };
+    const steps = try allocator.alloc(StepWire, execution.steps.len);
+    defer allocator.free(steps);
+    for (execution.steps, 0..) |step, i| {
+        steps[i] = .{
+            .module = step.module_id,
+            .cve = step.cve,
+            .oracle = if (step.oracle_pass) "pass" else "fail",
+            .output = step.output,
+        };
+    }
+    const Wire = struct {
+        schema: []const u8,
+        id: []const u8,
+        target: []const u8,
+        status: []const u8,
+        approval_id: []const u8,
+        steps: []const StepWire,
+        facts: []const u8,
+        recorded_at_unix: i64,
+    };
+    var json: std.json.Stringify = .{
+        .writer = &evidence.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    json.write(Wire{
+        .schema = "pocketroot.adaptive.evidence.v1",
+        .id = execution.goal_id,
+        .target = goal.target,
+        .status = execution.status,
+        .approval_id = execution.approval_id,
+        .steps = steps,
+        .facts = execution.facts_output,
+        .recorded_at_unix = campaignNow(io),
+    }) catch return error.CommandFailed;
+    try evidence.writer.writeByte('\n');
+    if (evidence_path) |file| {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = evidence.written() }) catch |err| {
+            try writer.print("cannot write adaptive evidence: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    }
+    if (json_output) try writer.writeAll(evidence.written());
+    if (!std.mem.eql(u8, execution.status, "succeeded")) return error.CommandFailed;
 }
