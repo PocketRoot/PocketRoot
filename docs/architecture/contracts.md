@@ -246,7 +246,7 @@ The approval binds the goal bytes and the digest of every referenced record. The
 recomputes the hash before execution. A `requires` predicate compares one fact with an
 `equals` value; an `output` copies a record capture into a fact (with an optional `transform`); an
 `input` binds a record template parameter from a fact or a default. A goal with
-`records` and no `modules` is resolved by metadata-driven synthesis before hashing. This is the adaptive kernel payload:
+`records` and no `modules` is resolved by metadata-driven synthesis before hashing. Selection is a bounded depth-first search with fact/selection rollback; requests already sent are not undone. This is the adaptive kernel payload:
 
 ```json
 {"kind":"exploit","mode":"adaptive","goal":"goal.json","campaign":".pocketroot"}

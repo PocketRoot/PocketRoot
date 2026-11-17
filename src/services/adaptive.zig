@@ -471,6 +471,180 @@ fn eligible(
     return true;
 }
 
+const Mutation = struct { fact: []const u8, previous: ?[]const u8 };
+const Candidate = struct { module: *const Module, index: usize };
+
+fn lessCandidate(_: void, left: Candidate, right: Candidate) bool {
+    if (left.module.priority != right.module.priority) return left.module.priority < right.module.priority;
+    return left.index < right.index;
+}
+
+fn freeStep(allocator: std.mem.Allocator, step: StepResult) void {
+    allocator.free(step.module_id);
+    allocator.free(step.cve);
+    allocator.free(step.output);
+}
+
+const SearchContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    goal: *const Goal,
+    target: []const u8,
+    campaign_dir: []const u8,
+    action_id: []const u8,
+    approval_id: []const u8,
+    facts: *std.StringHashMap([]const u8),
+    facts_arena: *std.heap.ArenaAllocator,
+    executed: *std.StringHashMap(void),
+    steps: *std.ArrayList(StepResult),
+    stop_context: *StopContext,
+    status: *[]const u8,
+    saw_error: bool = false,
+};
+
+fn rollback(
+    ctx: *SearchContext,
+    mutations: []const Mutation,
+    module: *const Module,
+) void {
+    var i = mutations.len;
+    while (i > 0) {
+        i -= 1;
+        const mutation = mutations[i];
+        if (mutation.previous) |previous| {
+            ctx.facts.put(mutation.fact, previous) catch {};
+        } else {
+            _ = ctx.facts.remove(mutation.fact);
+        }
+    }
+    _ = ctx.executed.remove(module.id);
+    if (ctx.steps.items.len > 0) {
+        const step = ctx.steps.items[ctx.steps.items.len - 1];
+        freeStep(ctx.allocator, step);
+        ctx.steps.items.len -= 1;
+    }
+}
+
+fn applyOutputsLogged(
+    ctx: *SearchContext,
+    module: *const Module,
+    outcome: *const exploit.Outcome,
+    mutations: *std.ArrayList(Mutation),
+) !void {
+    for (module.outputs) |output| {
+        for (outcome.captures) |capture| {
+            if (!std.mem.eql(u8, capture.name, output.capture)) continue;
+            try mutations.append(ctx.allocator, .{
+                .fact = output.fact,
+                .previous = ctx.facts.get(output.fact),
+            });
+            const transformed = try applyTransform(ctx.facts_arena.allocator(), output.transform, capture.value);
+            try ctx.facts.put(output.fact, try ctx.facts_arena.allocator().dupe(u8, transformed));
+        }
+    }
+}
+
+fn search(ctx: *SearchContext, depth: usize) !bool {
+    if (depth >= ctx.goal.max_steps) return false;
+    if (control.isStopped(ctx.allocator, ctx.io, ctx.campaign_dir)) {
+        ctx.status.* = "stopped";
+        return false;
+    }
+    var candidates: std.ArrayList(Candidate) = .empty;
+    defer candidates.deinit(ctx.allocator);
+    for (ctx.goal.modules, 0..) |*module, index| {
+        if (eligible(module, ctx.facts, ctx.executed)) {
+            try candidates.append(ctx.allocator, .{ .module = module, .index = index });
+        }
+    }
+    std.mem.sort(Candidate, candidates.items, {}, lessCandidate);
+    for (candidates.items) |candidate| {
+        const module = candidate.module;
+        var overrides: std.ArrayList(exploit.Param) = .empty;
+        defer overrides.deinit(ctx.allocator);
+        for (module.inputs) |input| {
+            const value = if (input.fact.len > 0)
+                factValue(ctx.facts, input.fact) orelse input.default
+            else
+                input.default;
+            try overrides.append(ctx.allocator, .{ .name = input.name, .value = value });
+        }
+        const record_data = std.Io.Dir.cwd().readFileAlloc(ctx.io, module.record, ctx.allocator, .limited(256 * 1024)) catch |err| {
+            ctx.status.* = @errorName(err);
+            ctx.saw_error = true;
+            continue;
+        };
+        defer ctx.allocator.free(record_data);
+        var spec = exploit.parseSpec(ctx.allocator, record_data) catch |err| {
+            ctx.status.* = @errorName(err);
+            ctx.saw_error = true;
+            continue;
+        };
+        defer spec.deinit();
+        spec.target = ctx.target;
+        var outcome = exploit.runWithOptions(ctx.allocator, ctx.io, &spec, overrides.items, .{
+            .stop = .{ .context = ctx.stop_context, .isStopped = stopCheck },
+        }) catch |err| {
+            if (err == error.Stopped) {
+                ctx.status.* = "stopped";
+                return false;
+            }
+            ctx.status.* = @errorName(err);
+            ctx.saw_error = true;
+            try appendLedgerSerialized(ctx.allocator, ctx.io, ctx.campaign_dir, .{
+                .event = "adaptive-step",
+                .action_id = ctx.action_id,
+                .approval_id = ctx.approval_id,
+                .target = ctx.target,
+                .technique = "exploit",
+                .result = @errorName(err),
+                .detail = module.id,
+            }, std.Io.Timestamp.now(ctx.io, .real).toSeconds());
+            continue;
+        };
+        defer outcome.deinit();
+
+        try ctx.executed.put(module.id, {});
+        try ctx.steps.append(ctx.allocator, .{
+            .module_id = try ctx.allocator.dupe(u8, module.id),
+            .cve = try ctx.allocator.dupe(u8, spec.cve),
+            .output = try ctx.allocator.dupe(u8, outcome.output),
+            .oracle_pass = outcome.oracle_pass,
+        });
+        var mutations: std.ArrayList(Mutation) = .empty;
+        defer mutations.deinit(ctx.allocator);
+        applyOutputsLogged(ctx, module, &outcome, &mutations) catch |err| {
+            ctx.status.* = @errorName(err);
+            ctx.saw_error = true;
+            rollback(ctx, mutations.items, module);
+            continue;
+        };
+        try appendLedgerSerialized(ctx.allocator, ctx.io, ctx.campaign_dir, .{
+            .event = "adaptive-step",
+            .action_id = ctx.action_id,
+            .approval_id = ctx.approval_id,
+            .target = ctx.target,
+            .technique = "exploit",
+            .result = if (outcome.oracle_pass) "succeeded" else "failed",
+            .detail = module.id,
+        }, std.Io.Timestamp.now(ctx.io, .real).toSeconds());
+        if (!outcome.oracle_pass) {
+            ctx.status.* = "failed";
+            ctx.saw_error = true;
+            rollback(ctx, mutations.items, module);
+            continue;
+        }
+        if (std.mem.indexOf(u8, outcome.output, ctx.goal.goal_contains) != null) {
+            ctx.status.* = "succeeded";
+            return true;
+        }
+        if (try search(ctx, depth + 1)) return true;
+        if (std.mem.eql(u8, ctx.status.*, "stopped")) return false;
+        rollback(ctx, mutations.items, module);
+    }
+    return false;
+}
+
 var ledger_mutex: std.Io.Mutex = .init;
 
 fn appendLedgerSerialized(
@@ -558,79 +732,27 @@ pub fn runForTarget(
     var steps: std.ArrayList(StepResult) = .empty;
     defer steps.deinit(allocator);
     var status: []const u8 = "goal_unmet";
-    var step_count: usize = 0;
-    while (step_count < goal.max_steps) : (step_count += 1) {
-        if (control.isStopped(allocator, io, campaign_dir)) {
-            status = "stopped";
-            break;
-        }
-        var chosen: ?*const Module = null;
-        for (goal.modules) |*module| {
-            if (!eligible(module, &facts, &executed)) continue;
-            if (chosen == null or module.priority < chosen.?.priority) chosen = module;
-        }
-        const module = chosen orelse break;
-
-        var overrides: std.ArrayList(exploit.Param) = .empty;
-        defer overrides.deinit(allocator);
-        for (module.inputs) |input| {
-            const value = if (input.fact.len > 0)
-                factValue(&facts, input.fact) orelse input.default
-            else
-                input.default;
-            try overrides.append(allocator, .{ .name = input.name, .value = value });
-        }
-
-        const record_data = std.Io.Dir.cwd().readFileAlloc(io, module.record, allocator, .limited(256 * 1024)) catch |err| {
-            status = @errorName(err);
-            break;
-        };
-        defer allocator.free(record_data);
-        var spec = exploit.parseSpec(allocator, record_data) catch |err| {
-            status = @errorName(err);
-            break;
-        };
-        defer spec.deinit();
-        spec.target = target;
-        var outcome = exploit.runWithOptions(allocator, io, &spec, overrides.items, .{
-            .stop = .{ .context = &stop_context, .isStopped = stopCheck },
-        }) catch |err| {
-            status = if (err == error.Stopped) "stopped" else @errorName(err);
-            break;
-        };
-        defer outcome.deinit();
-        try executed.put(module.id, {});
-        try steps.append(allocator, .{
-            .module_id = try allocator.dupe(u8, module.id),
-            .cve = try allocator.dupe(u8, spec.cve),
-            .output = try allocator.dupe(u8, outcome.output),
-            .oracle_pass = outcome.oracle_pass,
-        });
-        applyOutputs(module, &outcome, &facts, &facts_arena) catch |err| {
-            status = @errorName(err);
-            break;
-        };
-        try appendLedgerSerialized(allocator, io, campaign_dir, .{
-            .event = "adaptive-step",
-            .action_id = action_id,
-            .approval_id = approval.id,
-            .target = target,
-            .technique = "exploit",
-            .result = if (outcome.oracle_pass) "succeeded" else "failed",
-            .detail = module.id,
-        }, std.Io.Timestamp.now(io, .real).toSeconds());
-        if (!outcome.oracle_pass) {
-            status = "failed";
-            break;
-        }
-        if (std.mem.indexOf(u8, outcome.output, goal.goal_contains) != null) {
-            status = "succeeded";
-            break;
-        }
-        if (control.isStopped(allocator, io, campaign_dir)) {
-            status = "stopped";
-            break;
-        }
+    var search_context = SearchContext{
+        .allocator = allocator,
+        .io = io,
+        .goal = goal,
+        .target = target,
+        .campaign_dir = campaign_dir,
+        .action_id = action_id,
+        .approval_id = approval.id,
+        .facts = &facts,
+        .facts_arena = &facts_arena,
+        .executed = &executed,
+        .steps = &steps,
+        .stop_context = &stop_context,
+        .status = &status,
+    };
+    const found = search(&search_context, 0) catch |err| blk: {
+        status = @errorName(err);
+        break :blk false;
+    };
+    if (!found and std.mem.eql(u8, status, "goal_unmet") and search_context.saw_error) {
+        status = "failed";
     }
     try appendLedgerSerialized(allocator, io, campaign_dir, .{
         .event = "adaptive-result",

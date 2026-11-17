@@ -74,6 +74,18 @@ synthesizer uses `match.service`/`match.product`/`match.version_prefix` as requi
 step `capture` names as outputs. The approval hash is computed **after** synthesis, so it
 still binds every referenced record digest.
 
+## 1.2 Backtracking
+
+Selection is a bounded depth-first search, not a single greedy pick. After a module runs,
+the runner tries the next eligible module recursively. If a branch cannot reach the goal,
+it rolls back the facts and the executed-module mark, frees the step, and tries the next
+candidate. Replayed requests have side effects that cannot be undone; backtracking only
+restores the runner's state.
+
+Example: `a` captures `route=bad`; priority 1 module `b` overwrites `route=dead` and
+dead-ends; the runner rolls back to `route=bad` and tries `c`, which returns `uid=0`.
+The evidence shows `a` and `c`; the server saw `/a`, `/b` and `/c`.
+
 ## 2. Approval and execution
 
 ```bash
@@ -135,7 +147,7 @@ evidence document; a reused approval is audited as `denied`.
 | No concurrency | modules run sequentially |
 | In-flight STOP | the HTTP read loop checks the STOP marker every ~100 ms and aborts with status `stopped`; a connect/write already in progress can still complete |
 | Synthesis is metadata-driven | records without a `module` block only get match-derived requires and capture-derived outputs |
-| No backtracking | once a module is executed it is excluded; there is no search over alternatives yet |
+| Backtracking replays requests | rollback restores facts/selection, not target-side effects |
 | HTTP records only | transports remain the record's transport |
 | Goal is a substring check | no complex assertions or fact transformations |
 
