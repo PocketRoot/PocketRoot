@@ -67,6 +67,15 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "exploit")) {
+        if (args.len < 3 or !std.mem.eql(u8, args[2], "run")) {
+            try stdout.print("usage: exploit run <record.json> --campaign <dir> [--param k=v]\n", .{});
+            return error.InvalidArguments;
+        }
+        try runExploitCommand(arena, init.io, stdout, args[3..]);
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "network")) {
         if (args.len != 2) {
             try stdout.print("usage: network\n", .{});
@@ -978,6 +987,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  campaign run <ACTION-ID> --dry-run
         \\                       Verify the gate and consume the approval
         \\  reproduce <record.json> [--evidence <path>] [--json]
+        \\  exploit run <record.json> --campaign <dir> [--param k=v] [--evidence <path>] [--json]
+        \\  campaign approve-exploit <record.json> --reason <text> --confirm <CVE> [--param k=v]
         \\                       Run a PocketRoot reproduction record against its target
         \\  analyze [--json] <path>  Analyze a protocol file by extension
         \\  analyze [--json] [--base <hex>] [--arch <thumb|arm>] --protocol firmware <path>
@@ -1011,6 +1022,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot campaign stop
         \\  PocketRoot campaign approve-repro samples/reproductions/CVE-2021-41773/record.json --reason "ticket SEC-1" --confirm CVE-2021-41773
         \\  PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --campaign .pocketroot --evidence repro.json
+        \\  PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json --reason "ticket SEC-2" --confirm CVE-2018-7600
+        \\  PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json --campaign .pocketroot --param command=id --evidence exploit.json
         \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
         \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
@@ -2476,6 +2489,8 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign stop") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "reproduce <record.json>") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-repro") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "exploit run") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-exploit") != null);
 }
 
 const campaign_default_dir = ".pocketroot";
@@ -2533,6 +2548,7 @@ fn runCampaignCommand(
     if (std.mem.eql(u8, sub, "surface")) return runCampaignSurface(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "approve")) return runCampaignApprove(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "approve-repro")) return runCampaignApproveRepro(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "approve-exploit")) return runCampaignApproveExploit(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "run")) return runCampaignRun(allocator, io, writer, raw[1..]);
     try writer.print("unknown campaign command: {s}\n", .{sub});
     try printCampaignUsage(writer);
@@ -3643,4 +3659,421 @@ fn runCampaignApproveRepro(
         "approved {s}: {s} on {s}\napproval {s} expires at {d} (ttl {d}s, single use)\n",
         .{ approval.action_id, record.cve, approval.target, approval.id, approval.expires_at_unix, scope.approval_ttl_seconds },
     );
+}
+
+const ExploitParams = struct {
+    arena: std.heap.ArenaAllocator,
+    items: []PocketRoot.services.exploit.Param,
+
+    fn init(allocator: std.mem.Allocator) ExploitParams {
+        return .{ .arena = std.heap.ArenaAllocator.init(allocator), .items = &.{} };
+    }
+
+    fn deinit(self: *ExploitParams) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+fn parseExploitParams(
+    base: []const PocketRoot.services.exploit.Param,
+    raw: []const [:0]const u8,
+    allocator: std.mem.Allocator,
+) !ExploitParams {
+    var result = ExploitParams.init(allocator);
+    errdefer result.deinit();
+    const a = result.arena.allocator();
+    var list: std.ArrayList(PocketRoot.services.exploit.Param) = .empty;
+    defer list.deinit(a);
+    for (base) |param| try list.append(a, .{
+        .name = try a.dupe(u8, param.name),
+        .value = try a.dupe(u8, param.value),
+    });
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (!std.mem.startsWith(u8, raw[index], "--param")) {
+            index += 1;
+            continue;
+        }
+        if (index + 1 >= raw.len) return error.InvalidArguments;
+        const pair = raw[index + 1];
+        const equals = std.mem.indexOfScalar(u8, pair, '=') orelse return error.InvalidArguments;
+        const name = pair[0..equals];
+        const value = pair[equals + 1 ..];
+        if (name.len == 0 or name.len > 64 or value.len > PocketRoot.services.exploit.max_param_bytes) {
+            return error.InvalidArguments;
+        }
+        var replaced = false;
+        for (list.items) |*param| {
+            if (std.mem.eql(u8, param.name, name)) {
+                param.value = try a.dupe(u8, value);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) try list.append(a, .{
+            .name = try a.dupe(u8, name),
+            .value = try a.dupe(u8, value),
+        });
+        index += 2;
+    }
+    std.mem.sort(PocketRoot.services.exploit.Param, list.items, {}, lessThanParam);
+    result.items = try list.toOwnedSlice(a);
+    return result;
+}
+
+fn lessThanParam(_: void, a: PocketRoot.services.exploit.Param, b: PocketRoot.services.exploit.Param) bool {
+    return std.mem.lessThan(u8, a.name, b.name);
+}
+
+fn exploitAction(
+    allocator: std.mem.Allocator,
+    spec: *const PocketRoot.services.exploit.Spec,
+    record_data: []const u8,
+    params: []const PocketRoot.services.exploit.Param,
+) !ReproAction {
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
+    try buffer.writer.writeAll(record_data);
+    try buffer.writer.print("\n{s}\n{s}\n", .{ spec.cve, spec.target });
+    for (params) |param| {
+        try buffer.writer.print("{s}={s}\n", .{ param.name, param.value });
+    }
+    return .{
+        .action_id = try std.fmt.allocPrint(allocator, "EXPLOIT-{s}", .{spec.cve}),
+        .target = spec.target,
+        .params_hash = try PocketRoot.services.control.sha256Hex(allocator, buffer.written()),
+    };
+}
+
+fn runCampaignApproveExploit(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var record_path: ?[]const u8 = null;
+    var reason: ?[]const u8 = null;
+    var confirm: ?[]const u8 = null;
+    var operator: []const u8 = "operator";
+    var param_args: std.ArrayList([:0]const u8) = .empty;
+    defer param_args.deinit(allocator);
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--reason") and index + 1 < raw.len) {
+            reason = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--confirm") and index + 1 < raw.len) {
+            confirm = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--operator") and index + 1 < raw.len) {
+            operator = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--param") and index + 1 < raw.len) {
+            try param_args.append(allocator, "--param");
+            try param_args.append(allocator, raw[index + 1]);
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (record_path != null) return error.InvalidArguments;
+            record_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = record_path orelse {
+        try writer.print("usage: campaign approve-exploit <record.json> --reason <text> --confirm <CVE> [--param k=v]\n", .{});
+        return error.InvalidArguments;
+    };
+    const why = reason orelse {
+        try writer.print("approval requires --reason\n", .{});
+        return error.InvalidArguments;
+    };
+    const typed = confirm orelse {
+        try writer.print("approval requires --confirm <CVE>; there is no --yes\n", .{});
+        return error.InvalidArguments;
+    };
+
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024)) catch |err| {
+        try writer.print("cannot read exploit record: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var spec = PocketRoot.services.exploit.parseSpec(allocator, data) catch {
+        try writer.print("invalid exploit record: {s}\n", .{path});
+        return error.CommandFailed;
+    };
+    defer spec.deinit();
+    if (!std.mem.eql(u8, typed, spec.cve)) {
+        try writer.print("confirmation does not match {s}; nothing approved\n", .{spec.cve});
+        return error.InvalidArguments;
+    }
+    var params = parseExploitParams(spec.params, param_args.items, allocator) catch {
+        try writer.print("invalid --param value\n", .{});
+        return error.InvalidArguments;
+    };
+    defer params.deinit();
+
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    if (state.phase != .armed) {
+        try writer.print("campaign is {s}; run campaign arm first\n", .{@tagName(state.phase)});
+        return error.CommandFailed;
+    }
+    var action = exploitAction(allocator, &spec, data, params.items) catch |err| {
+        try writer.print("cannot bind exploit: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer action.deinit(allocator);
+    const now = campaignNow(io);
+    var approval = PocketRoot.services.control.createApproval(allocator, io, dir, &scope, .{
+        .action_id = action.action_id,
+        .target = action.target,
+        .technique = .exploit,
+        .params_hash = action.params_hash,
+    }, operator, why, now) catch |err| {
+        try writer.print("cannot approve {s}: {s}\n", .{ action.action_id, @errorName(err) });
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "approve",
+        .action_id = approval.action_id,
+        .approval_id = approval.id,
+        .target = approval.target,
+        .technique = "exploit",
+        .result = "approved",
+        .detail = approval.reason,
+    }, now);
+    try writer.print(
+        "approved {s}: {s} on {s}\napproval {s} expires at {d} (ttl {d}s, single use)\n",
+        .{ approval.action_id, spec.cve, approval.target, approval.id, approval.expires_at_unix, scope.approval_ttl_seconds },
+    );
+}
+
+fn runExploitCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var record_path: ?[]const u8 = null;
+    var evidence_path: ?[]const u8 = null;
+    var campaign_dir: ?[]const u8 = null;
+    var json_output = false;
+    var param_args: std.ArrayList([:0]const u8) = .empty;
+    defer param_args.deinit(allocator);
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--campaign") and index + 1 < raw.len) {
+            campaign_dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
+            evidence_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else if (std.mem.eql(u8, raw[index], "--param") and index + 1 < raw.len) {
+            try param_args.append(allocator, "--param");
+            try param_args.append(allocator, raw[index + 1]);
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (record_path != null) return error.InvalidArguments;
+            record_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = record_path orelse {
+        try writer.print("usage: exploit run <record.json> --campaign <dir> [--param k=v] [--evidence <path>] [--json]\n", .{});
+        return error.InvalidArguments;
+    };
+    const dir = campaign_dir orelse {
+        try writer.print("exploit run requires --campaign <dir> and an approval\n", .{});
+        return error.CommandFailed;
+    };
+
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024)) catch |err| {
+        try writer.print("cannot read exploit record: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var spec = PocketRoot.services.exploit.parseSpec(allocator, data) catch {
+        try writer.print("invalid exploit record: {s}\n", .{path});
+        return error.CommandFailed;
+    };
+    defer spec.deinit();
+    var params = parseExploitParams(spec.params, param_args.items, allocator) catch {
+        try writer.print("invalid --param value\n", .{});
+        return error.InvalidArguments;
+    };
+    defer params.deinit();
+    var action = exploitAction(allocator, &spec, data, params.items) catch |err| {
+        try writer.print("cannot bind exploit: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer action.deinit(allocator);
+
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    const now = campaignNow(io);
+    PocketRoot.services.control.evaluate(allocator, io, dir, &scope, &state, .{
+        .action_id = action.action_id,
+        .target = action.target,
+        .technique = .exploit,
+        .params_hash = action.params_hash,
+    }, now) catch |err| {
+        try writer.print("denied: {s}\n", .{mapCampaignDenial(err)});
+        PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+            .event = "denied",
+            .action_id = action.action_id,
+            .target = action.target,
+            .technique = "exploit",
+            .result = @errorName(err),
+            .detail = mapCampaignDenial(err),
+        }, now) catch {};
+        return error.CommandFailed;
+    };
+    const approval_file = try PocketRoot.services.control.approvalPath(allocator, dir, action.action_id);
+    defer allocator.free(approval_file);
+    var approval = PocketRoot.services.control.loadApproval(allocator, io, approval_file) catch |err| {
+        try writer.print("cannot load approval: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    const approval_id = approval.id;
+    PocketRoot.services.control.consumeApproval(allocator, io, approval_file, now) catch |err| {
+        try writer.print("cannot consume approval: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "exploit-start",
+        .action_id = action.action_id,
+        .approval_id = approval_id,
+        .target = action.target,
+        .technique = "exploit",
+        .result = "started",
+        .detail = spec.cve,
+    }, now);
+
+    var outcome = PocketRoot.services.exploit.run(allocator, io, &spec, params.items) catch |err| {
+        try writer.print("exploit failed: {s}\n", .{@errorName(err)});
+        PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+            .event = "exploit-result",
+            .action_id = action.action_id,
+            .approval_id = approval_id,
+            .target = action.target,
+            .technique = "exploit",
+            .result = @errorName(err),
+            .detail = spec.cve,
+        }, campaignNow(io)) catch {};
+        return error.CommandFailed;
+    };
+    defer outcome.deinit();
+
+    try writer.print("exploit {s}: {s} on {s}\n", .{ spec.cve, @tagName(spec.effect), spec.target });
+    for (outcome.steps) |step| {
+        try writer.print("  step {s}: status={d} bytes={d}\n", .{ step.name, step.status, step.bytes });
+    }
+    if (spec.effect == .command) {
+        try writer.print("command: {s}\n", .{outcome.command});
+    } else {
+        var file_value: []const u8 = "";
+        for (params.items) |param| {
+            if (std.mem.eql(u8, param.name, "file")) file_value = param.value;
+        }
+        try writer.print("file: {s}\n", .{file_value});
+    }
+    try writer.print("output:\n{s}\n", .{outcome.output});
+    try writer.print("oracle: {s}\n", .{if (outcome.oracle_pass) "pass" else "fail"});
+
+    var evidence_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer evidence_buffer.deinit();
+    const StepWire = struct { name: []const u8, status: u16, bytes: usize };
+    const step_wires = try allocator.alloc(StepWire, outcome.steps.len);
+    defer allocator.free(step_wires);
+    for (outcome.steps, 0..) |step, i| step_wires[i] = .{ .name = step.name, .status = step.status, .bytes = step.bytes };
+    const Wire = struct {
+        schema: []const u8,
+        cve: []const u8,
+        effect: []const u8,
+        target: []const u8,
+        command: []const u8,
+        file: []const u8,
+        output: []const u8,
+        oracle: []const u8,
+        action_id: []const u8,
+        approval_id: []const u8,
+        steps: []const StepWire,
+        recorded_at_unix: i64,
+    };
+    var json: std.json.Stringify = .{
+        .writer = &evidence_buffer.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    json.write(Wire{
+        .schema = "pocketroot.exploit.evidence.v1",
+        .cve = spec.cve,
+        .effect = @tagName(spec.effect),
+        .target = spec.target,
+        .command = if (spec.effect == .command) outcome.command else "",
+        .file = blk: {
+            var value: []const u8 = "";
+            for (params.items) |param| {
+                if (std.mem.eql(u8, param.name, "file")) value = param.value;
+            }
+            break :blk value;
+        },
+        .output = outcome.output,
+        .oracle = if (outcome.oracle_pass) "pass" else "fail",
+        .action_id = action.action_id,
+        .approval_id = approval_id,
+        .steps = step_wires,
+        .recorded_at_unix = campaignNow(io),
+    }) catch return error.CommandFailed;
+    try evidence_buffer.writer.writeByte('\n');
+
+    if (evidence_path) |file| {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = evidence_buffer.written() }) catch |err| {
+            try writer.print("cannot write evidence: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    }
+    if (json_output) try writer.writeAll(evidence_buffer.written());
+
+    PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "exploit-result",
+        .action_id = action.action_id,
+        .approval_id = approval_id,
+        .target = action.target,
+        .technique = "exploit",
+        .result = if (outcome.oracle_pass) "succeeded" else "failed",
+        .detail = spec.cve,
+    }, campaignNow(io)) catch {};
+    if (PocketRoot.services.control.isStopped(allocator, io, dir)) {
+        try writer.print("stop marker observed; no further exploit will start\n", .{});
+    }
+    if (!outcome.oracle_pass) return error.CommandFailed;
 }

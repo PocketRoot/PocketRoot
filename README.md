@@ -10,6 +10,8 @@ CLI that performs three kinds of work:
 - **Scripted automation** — a Lua-style DSL compiled onto the workflow runner, with a
   capability kernel that gates every operation, records an audit entry, and denies
   active operations unless they are explicitly authorised.
+- **Effect execution** — declarative exploit records that carry a command or file-read
+  effect through ordered HTTP steps, with campaign approval, stop and evidence.
 
 The engine has no third-party dependencies. Everything runs on the standard library.
 
@@ -44,6 +46,10 @@ PocketRoot audit audit.jsonl
 # raw HTTP reproduction: record -> rendered script -> live probe -> evidence
 PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --evidence repro.json
 
+# effect execution: approve the record, then run the exploit with an effect parameter
+PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json --reason "ticket SEC-2" --confirm CVE-2018-7600 --param command=id
+PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json --campaign .pocketroot --param command=id --evidence exploit.json
+
 # scope -> read-only surface -> human approval with a configurable TTL -> gated dry run
 PocketRoot campaign init --scope samples/campaign/scope.json
 PocketRoot campaign arm
@@ -68,12 +74,20 @@ the final status, one audit line per capability request, and every emitted findi
 backend and writes evidence with the expected/observed outcome. The sample probes
 CVE-2021-41773's raw path traversal and fails unless the response contains `root:x:0:0`.
 
+`exploit run` is the effect layer: an exploit record executes ordered HTTP steps, captures
+values such as a form build id, extracts command output between markers and writes
+`pocketroot.exploit.evidence.v1`. It always needs a campaign approval; the approval binds
+the record bytes, target and effective params. The sample executes a command through
+CVE-2018-7600 on a Drupal 7.57 lab and returns the command output. See
+[docs/product/exploits.md](docs/product/exploits.md).
+
 `campaign surface` is read-only and needs no approval: it turns catalogued observations
 into ranked candidate actions and writes `.pocketroot/surface.json`. `campaign approve`
 mints a single-use approval whose TTL comes from the scope (`approval_ttl_seconds`, default
 15 minutes); `campaign run` only supports `--dry-run` in this build, but the scope check,
 approval consumption, stop marker and hash-chained ledger are real. `campaign stop` is
-checked before any action starts. See [docs/capabilities/campaign.md](docs/capabilities/campaign.md).
+checked before any action starts. `campaign approve-exploit` is the same gate for exploit
+records; `exploit run` consumes the approval before its first request. See [docs/capabilities/campaign.md](docs/capabilities/campaign.md).
 
 ## Repository layout
 
@@ -84,7 +98,7 @@ src/protocols/    protocol plugins (subghz, nfc, infrared, firmware, nmap, pcap,
 src/formats/      binary format decoders (Thumb, TLS certificate, NBNS, SSDP, flipper)
 src/simulator/    runtime, simulated capability backend, loopback transport
 src/cli/          command line entry point
-samples/          small fixtures used by the smoke checks
+samples/          small fixtures, reproductions and exploit records
 docs/             documentation
 ```
 

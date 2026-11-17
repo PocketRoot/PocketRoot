@@ -68,6 +68,12 @@ PocketRoot campaign approve ACTION-1 --reason "ticket SEC-1" --confirm ACTION-1
 # gate + consume + ledger; only dry-run exists today
 PocketRoot campaign run ACTION-1 --dry-run
 
+# effect execution: approve the record, target and effective params
+PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json \
+    --reason "ticket SEC-2" --confirm CVE-2018-7600 --param command=id
+PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json \
+    --campaign .pocketroot --param command=id
+
 PocketRoot campaign status
 PocketRoot campaign stop
 ```
@@ -98,9 +104,9 @@ entry. `evaluate` checks the stop marker before anything else, so:
 
 - a new action is refused with `campaign is stopped`;
 - arming clears the marker only through an explicit `campaign arm`;
-- a running executor is expected to check the same marker between actions and before each
-  network call. This build does not contain such an executor, so the marker's runtime effect
-  is limited to what the caller implements.
+- `exploit run` checks the marker before the first request and after the last one; it does
+  not currently check between every step, so a stop cannot interrupt a multi-step chain in
+  flight.
 
 The stop control is software-only today. A real device must add an independent hardware
 inhibit line and a watchdog; the marker is not a substitute for cutting PA/VBUS/NFC power.
@@ -119,6 +125,15 @@ PocketRoot reproduce repro/record.json --campaign .pocketroot --evidence repro.j
 the script invalidates it. `reproduce` calls the same `evaluate`, consumes the approval
 before staging the script, checks the stop marker, and writes `repro-start`/`repro-result`
 to the ledger. Validation records (`kind: "validate"`) still run without a campaign.
+
+### 5.2 Exploit records
+
+`campaign approve-exploit <record.json>` is the equivalent gate for
+`pocketroot.exploit.v1` records. It binds the approval to the record bytes, target, CVE and
+the sorted effective params (`--param k=v`), then `exploit run --campaign <dir>` evaluates,
+consumes the approval before its first request and writes `exploit-start`/`exploit-result`.
+Changing the command, file, target or any step invalidates the approval. See
+[exploits](../product/exploits.md).
 
 ## 6. Ledger
 

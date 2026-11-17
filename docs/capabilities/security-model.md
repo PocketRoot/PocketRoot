@@ -128,4 +128,6 @@ execution is not. See [campaign](campaign.md) for the command flow and limits.
 | No OS permission checks | The kernel does not verify privileges such as those `pktmon` requires |
 | Campaign approvals are local files | A compromised campaign directory can mint approvals; operator identity is a recorded string, not an authenticated principal |
 | Campaign stop is software-only | No hardware inhibit line or watchdog exists; a real device must add both |
-| Network probes bypass the campaign gate | `tcp-scan`, `http-inspect`, `tls-inspect` and `net.http`/`reproduce` predate the control plane and do not require an approval |
+| Network probes bypass the campaign gate | `tcp-scan`, `http-inspect`, `tls-inspect`, `net.http`/`net.udp` scripts and validation `reproduce` records predate the control plane and do not require an approval |
+| Exploit effects are not sandboxed | `exploit run` sends the approved requests only; the effect on the target (command execution, file read) is limited by the target, not by the engine |
+| Stop is checked at exploit boundaries | The runner checks STOP before the first and after the last step, not between steps of an in-flight chain |

@@ -206,6 +206,15 @@ The live backend dispatches HTTP to `services/http_probe.zig`, UDP to `services/
 subject and workflow are unchanged. The probe result is a key=value payload with
 `status`, `status_line`, `body_bytes`, `body_prefix`, `oracle` and `oracle_reason`.
 
+### 4.2 `pocketroot.exploit.v1`
+
+An exploit record is an ordered HTTP chain. Template variables are substituted before each
+step: `{{target}}`, `{{command}}`, `{{command_raw}}`, `{{command_url}}`, `{{file}}`,
+`{{file_url}}`, `{{marker_start}}`, `{{marker_end}}` and captured names. `capture` stores
+the text between two delimiters; `extract` returns the effect between two delimiters.
+`effect: command` requires an extract (the runner wraps the command in markers);
+`effect: read_file` falls back to the final response body.
+
 ## 5. Schema identifiers
 
 | Schema | Location | Purpose |
@@ -225,6 +234,8 @@ subject and workflow are unchanged. The probe result is a key=value payload with
 | `pocketroot.surface.v1` | `services/surface.zig` | Attack-surface report and candidate actions |
 | `pocketroot.reproduction.v1` | `samples/reproductions/*/record.json` | One reproduction record consumed by `reproduce` |
 | `pocketroot.reproduction.evidence.v1` | `cli/main.zig` | One reproduction run, observed outcome and approval id when gated |
+| `pocketroot.exploit.v1` | `samples/exploits/*/record.json` | Ordered HTTP steps, capture/extract delimiters and an effect |
+| `pocketroot.exploit.evidence.v1` | `cli/main.zig` | Effect output, per-step status and the approval that authorised it |
 
 The schema identifier is the compatibility boundary. Changing fields without bumping the
 version breaks consumers; `UnsupportedCatalogSchema` reports a mismatch.

@@ -25,6 +25,8 @@ The I/O column states where the work actually happens.
 | `campaign run <ACTION-ID> --dry-run` | any | none | `services/control.zig` | approval consumed once, stop checked first | missing/used/expired approval or stopped: exit 1 |
 | `campaign approve-repro <record.json>` | any | filesystem | `services/control.zig` | typed CVE confirmation, one record | missing approval or disarmed: exit 1 |
 | `reproduce <record.json>` | any | real TCP/UDP | `http_probe`/`udp_probe` + DSL | 256 KiB response, 1-4096 B datagram, 50-5000 ms | failed oracle, invalid record or ungated exploit: exit 1 |
+| `campaign approve-exploit <record.json>` | any | filesystem | `services/control.zig` | record bytes + target + params, one approval | disarmed or outside scope: exit 1 |
+| `exploit run <record.json>` | any | real TCP | `services/exploit.zig` | 1-8 HTTP steps, 4 KiB effect evidence | missing approval, missing capture/extract or failed transport: exit 1 |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |
 | `capture <s> <out> <comp>` | Windows only | real | `pktmon` start/stop/etl2pcap | 1-60 s, 1-64 MB, output <= 80 MiB | refuses overwrite, validates pcapng header and trailer |
@@ -66,6 +68,7 @@ The commands above are exercised by the smoke checks in `build.zig`.
 | `services/surface.zig` | Attack-surface report: access, capability, feasibility, candidate actions | `campaign surface` |
 | `services/http_probe.zig` | Raw HTTP/1.1 request and oracle for reproduction scripts | `net.http` via `script run --live`, `reproduce` |
 | `services/udp_probe.zig` | One datagram and an amplification/size oracle | `net.udp` via `script run --live`, `reproduce` |
+| `services/exploit.zig` | Ordered HTTP exploit steps, capture/extract and effect evidence | `exploit run` |
 
 ## 4. Failure semantics
 
