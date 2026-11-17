@@ -105,6 +105,21 @@ entry. `evaluate` checks the stop marker before anything else, so:
 The stop control is software-only today. A real device must add an independent hardware
 inhibit line and a watchdog; the marker is not a substitute for cutting PA/VBUS/NFC power.
 
+### 5.1 Exploit reproductions
+
+A reproduction record with `"kind": "exploit"` is not a free-standing command. Bind it to a
+campaign, approve it, then run it:
+
+```bash
+PocketRoot campaign approve-repro repro/record.json --reason "ticket SEC-1" --confirm CVE-2021-41773
+PocketRoot reproduce repro/record.json --campaign .pocketroot --evidence repro.json
+```
+
+`approve-repro` binds the approval to the record's CVE, target and **script bytes**; editing
+the script invalidates it. `reproduce` calls the same `evaluate`, consumes the approval
+before staging the script, checks the stop marker, and writes `repro-start`/`repro-result`
+to the ledger. Validation records (`kind: "validate"`) still run without a campaign.
+
 ## 6. Ledger
 
 `<dir>/ledger.jsonl` uses `pocketroot.ledger.v1`:
@@ -149,7 +164,7 @@ the sample uses a v2 entry.
 | No transport authentication | approvals are local files; a compromised campaign directory can mint approvals |
 | Operator identity is a string | `--operator` is recorded, not authenticated; add TOTP/WebAuthn for real deployments |
 | Network probes are not routed through this gate | `tcp-scan`, `http-inspect`, `tls-inspect` and `net.http`/`reproduce` predate or bypass the control plane |
-| Reproduction exploit records are refused | `reproduce` rejects `kind: "exploit"`; a gated executor is still to be built |
+| Exploit reproduction needs a campaign | `reproduce --campaign` for a `kind: "exploit"` record uses the same approval/stop/ledger path; validation records do not |
 | Ledger is not signed | tamper-evident only |
 | No hardware stop | no inhibit line, no watchdog, no power cut |
 

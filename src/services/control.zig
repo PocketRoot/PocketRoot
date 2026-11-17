@@ -164,13 +164,24 @@ fn ipv4InCidr(address: [4]u8, network: [4]u8, prefix: u8) bool {
     return true;
 }
 
-/// Exact hostname/IP match, or an IPv4 CIDR such as 192.0.2.0/24.
+fn hostPart(target: []const u8) []const u8 {
+    const colon = std.mem.lastIndexOfScalar(u8, target, ':') orelse return target;
+    if (colon + 1 >= target.len) return target;
+    _ = std.fmt.parseInt(u16, target[colon + 1 ..], 10) catch return target;
+    return target[0..colon];
+}
+
+/// Exact hostname/IP match, a host without a port matching host:port, or an IPv4 CIDR
+/// such as 192.0.2.0/24.
 pub fn matchesTarget(allowed: []const u8, target: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(allowed, target)) return true;
+    const host = hostPart(target);
+    if (std.mem.indexOfScalar(u8, allowed, '/') == null and
+        std.ascii.eqlIgnoreCase(allowed, host)) return true;
     const slash = std.mem.indexOfScalar(u8, allowed, '/') orelse return false;
     const network = parseIpv4(allowed[0..slash]) orelse return false;
     const prefix = std.fmt.parseInt(u8, allowed[slash + 1 ..], 10) catch return false;
-    const address = parseIpv4(target) orelse return false;
+    const address = parseIpv4(host) orelse return false;
     return ipv4InCidr(address, network, prefix);
 }
 
@@ -870,4 +881,10 @@ test "ledger entries chain their hashes" {
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "scope host entries match host:port targets" {
+    try std.testing.expect(matchesTarget("127.0.0.1", "127.0.0.1:8080"));
+    try std.testing.expect(matchesTarget("192.0.2.0/24", "192.0.2.80:443"));
+    try std.testing.expect(!matchesTarget("127.0.0.1", "127.0.0.2:8080"));
 }

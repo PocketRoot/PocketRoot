@@ -108,6 +108,20 @@ Limits:
 The live backend dispatches a JSON spec only when `--live` is set; without it the
 simulator echoes the payload, so a script can be reviewed offline but not claim a probe.
 
+### 4.2 Datagram probe: `net.udp`
+
+`services/udp_probe.zig` sends one datagram and waits for one response:
+
+- Bind a local UDP socket, resolve the target, send `data` (1-4096 bytes), receive one
+  datagram (64 KiB cap) with a 50-5000 ms timeout.
+- Oracle: `expect_min_bytes`, `expect_body`, `expect_absent`.
+- Result: `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason`.
+- A missing response is an oracle failure (`succeeded` + `oracle=fail`), not a transport
+  error, so the script can decide with `fail`.
+
+It is a measurement primitive: a large response does not prove source-address spoofing
+or that a third party can trigger it.
+
 ## 5. TLS: `tls-inspect` and `formats/tls_certificate.zig`
 
 `services/tls_inspect.zig`

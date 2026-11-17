@@ -973,6 +973,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                       Read-only attack surface with candidate actions
         \\  campaign approve <ACTION-ID> --reason <text> --confirm <ACTION-ID>
         \\                       Single-use human approval with the scope's TTL
+        \\  campaign approve-repro <record.json> --reason <text> --confirm <CVE>
+        \\                       Approve one kind=exploit reproduction record
         \\  campaign run <ACTION-ID> --dry-run
         \\                       Verify the gate and consume the approval
         \\  reproduce <record.json> [--evidence <path>] [--json]
@@ -1007,7 +1009,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot campaign approve ACTION-1 --reason "ticket SEC-1" --confirm ACTION-1
         \\  PocketRoot campaign run ACTION-1 --dry-run
         \\  PocketRoot campaign stop
-        \\  PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --evidence repro.json
+        \\  PocketRoot campaign approve-repro samples/reproductions/CVE-2021-41773/record.json --reason "ticket SEC-1" --confirm CVE-2021-41773
+        \\  PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --campaign .pocketroot --evidence repro.json
         \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
         \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
@@ -2472,6 +2475,7 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign stop") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "reproduce <record.json>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-repro") != null);
 }
 
 const campaign_default_dir = ".pocketroot";
@@ -2528,6 +2532,7 @@ fn runCampaignCommand(
     if (std.mem.eql(u8, sub, "status")) return runCampaignStatus(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "surface")) return runCampaignSurface(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "approve")) return runCampaignApprove(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "approve-repro")) return runCampaignApproveRepro(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "run")) return runCampaignRun(allocator, io, writer, raw[1..]);
     try writer.print("unknown campaign command: {s}\n", .{sub});
     try printCampaignUsage(writer);
@@ -3265,10 +3270,14 @@ fn runReproduceCommand(
 ) !void {
     var record_path: ?[]const u8 = null;
     var evidence_path: ?[]const u8 = null;
+    var campaign_dir: ?[]const u8 = null;
     var json_output = false;
     var index: usize = 0;
     while (index < raw.len) {
-        if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--campaign") and index + 1 < raw.len) {
+            campaign_dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
             evidence_path = raw[index + 1];
             index += 2;
         } else if (std.mem.eql(u8, raw[index], "--json")) {
@@ -3306,12 +3315,72 @@ fn runReproduceCommand(
         try writer.print("reproduction record is missing schema, cve, target, script or expected\n", .{});
         return error.CommandFailed;
     }
-    // Exploitation is not a free-standing command: it must be approved through the
-    // campaign control plane. This build therefore refuses exploit records instead of
-    // silently running them without an approval.
+    var action_holder: ?ReproAction = null;
+    defer if (action_holder) |*value| value.deinit(allocator);
+    var approval_holder: ?PocketRoot.services.control.Approval = null;
+    defer if (approval_holder) |*value| value.deinit();
+    var approval_id: []const u8 = "";
+
+    // Exploitation is not a free-standing command: it must carry a live campaign
+    // approval. Validation records remain usable without a campaign.
     if (std.mem.eql(u8, record.kind, "exploit")) {
-        try writer.print("exploit reproduction is disabled; approve it through the campaign control plane\n", .{});
-        return error.CommandFailed;
+        const dir = campaign_dir orelse {
+            try writer.print("exploit reproduction requires --campaign <dir> and an approval\n", .{});
+            return error.CommandFailed;
+        };
+        var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+            try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer scope.deinit();
+        var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+            try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        defer state.deinit();
+        action_holder = reproAction(allocator, io, path, record) catch |err| {
+            try writer.print("cannot bind reproduction: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        const action = action_holder.?;
+        const now = campaignNow(io);
+        PocketRoot.services.control.evaluate(allocator, io, dir, &scope, &state, .{
+            .action_id = action.action_id,
+            .target = action.target,
+            .technique = .exploit,
+            .params_hash = action.params_hash,
+        }, now) catch |err| {
+            try writer.print("denied: {s}\n", .{mapCampaignDenial(err)});
+            PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+                .event = "denied",
+                .action_id = action.action_id,
+                .target = action.target,
+                .technique = "exploit",
+                .result = @errorName(err),
+                .detail = mapCampaignDenial(err),
+            }, now) catch {};
+            return error.CommandFailed;
+        };
+        const approval_file = try PocketRoot.services.control.approvalPath(allocator, dir, action.action_id);
+        defer allocator.free(approval_file);
+        approval_holder = PocketRoot.services.control.loadApproval(allocator, io, approval_file) catch |err| {
+            try writer.print("cannot load approval: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        approval_id = approval_holder.?.id;
+        PocketRoot.services.control.consumeApproval(allocator, io, approval_file, now) catch |err| {
+            try writer.print("cannot consume approval: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+        try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+            .event = "repro-start",
+            .action_id = action.action_id,
+            .approval_id = approval_id,
+            .target = action.target,
+            .technique = "exploit",
+            .result = "started",
+            .detail = record.cve,
+        }, now);
     }
 
     const record_dir = std.fs.path.dirname(path) orelse ".";
@@ -3346,6 +3415,24 @@ fn runReproduceCommand(
     };
     try writer.writeAll(capture.written());
 
+    if (std.mem.eql(u8, record.kind, "exploit")) {
+        if (campaign_dir) |dir| {
+            const ended = campaignNow(io);
+            PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+                .event = "repro-result",
+                .action_id = if (action_holder) |action| action.action_id else "",
+                .approval_id = approval_id,
+                .target = record.target,
+                .technique = "exploit",
+                .result = if (ok) "succeeded" else "failed",
+                .detail = record.cve,
+            }, ended) catch {};
+            if (PocketRoot.services.control.isStopped(allocator, io, dir)) {
+                try writer.print("stop marker observed; no further reproduction will start\n", .{});
+            }
+        }
+    }
+
     const observed = if (ok)
         record.expected
     else if (std.mem.eql(u8, record.expected, "vulnerable"))
@@ -3367,6 +3454,8 @@ fn runReproduceCommand(
         observed: []const u8,
         script: []const u8,
         status: []const u8,
+        action_id: []const u8,
+        approval_id: []const u8,
         recorded_at_unix: i64,
     };
     var json: std.json.Stringify = .{
@@ -3383,6 +3472,8 @@ fn runReproduceCommand(
         .observed = observed,
         .script = record.script,
         .status = if (ok) "succeeded" else "failed",
+        .action_id = if (action_holder) |action| action.action_id else "",
+        .approval_id = approval_id,
         .recorded_at_unix = now,
     }) catch return error.CommandFailed;
     try evidence_buffer.writer.writeByte('\n');
@@ -3405,4 +3496,151 @@ fn runReproduceCommand(
         });
     }
     if (!ok) return error.CommandFailed;
+}
+
+const ReproAction = struct {
+    action_id: []u8,
+    target: []const u8,
+    params_hash: []u8,
+
+    fn deinit(self: *ReproAction, allocator: std.mem.Allocator) void {
+        allocator.free(self.action_id);
+        allocator.free(self.params_hash);
+        self.* = undefined;
+    }
+};
+
+/// Binds an exploit reproduction to the exact record, target and script bytes. The same
+/// function feeds approve-repro and reproduce, so a changed probe invalidates an approval.
+fn reproAction(
+    allocator: std.mem.Allocator,
+    io: Io,
+    record_path: []const u8,
+    record: ReproductionWire,
+) !ReproAction {
+    const record_dir = std.fs.path.dirname(record_path) orelse ".";
+    const script_path = try std.fs.path.join(allocator, &.{ record_dir, record.script });
+    defer allocator.free(script_path);
+    const script = try Io.Dir.cwd().readFileAlloc(io, script_path, allocator, .limited(PocketRoot.services.script.max_script_bytes));
+    defer allocator.free(script);
+    const canonical = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ record.cve, record.target, script });
+    defer allocator.free(canonical);
+    return .{
+        .action_id = try std.fmt.allocPrint(allocator, "REPRO-{s}", .{record.cve}),
+        .target = record.target,
+        .params_hash = try PocketRoot.services.control.sha256Hex(allocator, canonical),
+    };
+}
+
+fn runCampaignApproveRepro(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var record_path: ?[]const u8 = null;
+    var reason: ?[]const u8 = null;
+    var confirm: ?[]const u8 = null;
+    var operator: []const u8 = "operator";
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--reason") and index + 1 < raw.len) {
+            reason = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--confirm") and index + 1 < raw.len) {
+            confirm = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--operator") and index + 1 < raw.len) {
+            operator = raw[index + 1];
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (record_path != null) return error.InvalidArguments;
+            record_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = record_path orelse {
+        try writer.print("usage: campaign approve-repro <record.json> --reason <text> --confirm <CVE>\n", .{});
+        return error.InvalidArguments;
+    };
+    const why = reason orelse {
+        try writer.print("approval requires --reason\n", .{});
+        return error.InvalidArguments;
+    };
+    const typed = confirm orelse {
+        try writer.print("approval requires --confirm <CVE>; there is no --yes\n", .{});
+        return error.InvalidArguments;
+    };
+
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024)) catch |err| {
+        try writer.print("cannot read reproduction record: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var parsed = std.json.parseFromSlice(ReproductionWire, allocator, data, .{ .ignore_unknown_fields = true }) catch {
+        try writer.print("invalid reproduction record: {s}\n", .{path});
+        return error.CommandFailed;
+    };
+    defer parsed.deinit();
+    const record = parsed.value;
+    if (!std.mem.eql(u8, record.schema, "pocketroot.reproduction.v1") or
+        !std.mem.eql(u8, record.kind, "exploit"))
+    {
+        try writer.print("campaign approve-repro needs a kind=exploit record\n", .{});
+        return error.CommandFailed;
+    }
+    if (!std.mem.eql(u8, typed, record.cve)) {
+        try writer.print("confirmation does not match {s}; nothing approved\n", .{record.cve});
+        return error.InvalidArguments;
+    }
+
+    var scope = loadCampaignScope(allocator, io, dir) catch |err| {
+        try writer.print("cannot load scope: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer scope.deinit();
+    var state = PocketRoot.services.control.loadState(allocator, io, dir) catch |err| {
+        try writer.print("cannot load campaign state: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer state.deinit();
+    if (state.phase != .armed) {
+        try writer.print("campaign is {s}; run campaign arm first\n", .{@tagName(state.phase)});
+        return error.CommandFailed;
+    }
+    var action = reproAction(allocator, io, path, record) catch |err| {
+        try writer.print("cannot bind reproduction: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer action.deinit(allocator);
+    const now = campaignNow(io);
+    var approval = PocketRoot.services.control.createApproval(allocator, io, dir, &scope, .{
+        .action_id = action.action_id,
+        .target = action.target,
+        .technique = .exploit,
+        .params_hash = action.params_hash,
+    }, operator, why, now) catch |err| {
+        try writer.print("cannot approve {s}: {s}\n", .{ action.action_id, @errorName(err) });
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    try PocketRoot.services.control.appendLedger(allocator, io, dir, .{
+        .event = "approve",
+        .action_id = approval.action_id,
+        .approval_id = approval.id,
+        .target = approval.target,
+        .technique = "exploit",
+        .result = "approved",
+        .detail = approval.reason,
+    }, now);
+    try writer.print(
+        "approved {s}: {s} on {s}\napproval {s} expires at {d} (ttl {d}s, single use)\n",
+        .{ approval.action_id, record.cve, approval.target, approval.id, approval.expires_at_unix, scope.approval_ttl_seconds },
+    );
 }

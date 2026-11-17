@@ -16,12 +16,15 @@ pub const max_target_bytes = 255;
 
 pub const Method = enum { get, post, head, put, delete };
 
+pub const Header = struct { name: []const u8, value: []const u8 };
+
 pub const Spec = struct {
     arena: std.heap.ArenaAllocator,
     target: []const u8,
     method: Method,
     path: []const u8,
     body: []const u8,
+    headers: []const Header,
     timeout_ms: u32,
     expect_status: ?u16,
     expect_body: []const u8,
@@ -33,12 +36,15 @@ pub const Spec = struct {
     }
 };
 
+const HeaderWire = struct { name: []const u8 = "", value: []const u8 = "" };
+
 const SpecWire = struct {
     kind: []const u8 = "http",
     target: []const u8 = "",
     method: []const u8 = "GET",
     path: []const u8 = "/",
     body: []const u8 = "",
+    headers: []const HeaderWire = &.{},
     timeout_ms: u32 = 2000,
     expect_status: ?u16 = null,
     expect_body: []const u8 = "",
@@ -75,6 +81,22 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
     if (wire.path.len == 0 or wire.path.len > max_path_bytes) return error.InvalidRequestPath;
     if (wire.body.len > max_body_bytes) return error.RequestBodyTooLarge;
     if (wire.timeout_ms < 50 or wire.timeout_ms > 5000) return error.InvalidTimeout;
+    if (wire.headers.len > 16) return error.TooManyHeaders;
+    const headers = try a.alloc(Header, wire.headers.len);
+    var header_bytes: usize = 0;
+    for (wire.headers, 0..) |header, header_index| {
+        if (header.name.len == 0 or header.name.len > 64) return error.InvalidHeader;
+        if (header.value.len > 1024) return error.InvalidHeader;
+        for (header.name) |byte| {
+            if (byte <= 0x20 or byte >= 0x7f or byte == ':') return error.InvalidHeader;
+        }
+        for (header.value) |byte| {
+            if (byte == '\r' or byte == '\n' or byte == 0) return error.InvalidHeader;
+        }
+        header_bytes += header.name.len + header.value.len + 4;
+        headers[header_index] = .{ .name = header.name, .value = header.value };
+    }
+    if (header_bytes > 8 * 1024) return error.HeadersTooLarge;
     const method = std.meta.stringToEnum(Method, wire.method) orelse blk: {
         // Accept upper-case spellings from the DSL.
         if (std.ascii.eqlIgnoreCase(wire.method, "GET")) break :blk Method.get;
@@ -94,6 +116,7 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
         .method = method,
         .path = wire.path,
         .body = wire.body,
+        .headers = headers,
         .timeout_ms = wire.timeout_ms,
         .expect_status = wire.expect_status,
         .expect_body = wire.expect_body,
@@ -131,22 +154,34 @@ fn methodText(method: Method) []const u8 {
 
 /// Builds the request bytes. Connection: close makes the read terminate without parsing
 /// every transfer-encoding edge case; the response parser still understands chunked bodies.
+fn hasHeader(spec: *const Spec, name: []const u8) bool {
+    for (spec.headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return true;
+    }
+    return false;
+}
+
 fn buildRequest(allocator: std.mem.Allocator, spec: *const Spec, target: Target) ![]u8 {
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
     const writer = &output.writer;
     try writer.print("{s} {s} HTTP/1.1\r\n", .{ methodText(spec.method), spec.path });
-    if (target.port == 80) {
-        try writer.print("Host: {s}\r\n", .{target.host});
-    } else {
-        try writer.print("Host: {s}:{d}\r\n", .{ target.host, target.port });
+    if (!hasHeader(spec, "Host")) {
+        if (target.port == 80) {
+            try writer.print("Host: {s}\r\n", .{target.host});
+        } else {
+            try writer.print("Host: {s}:{d}\r\n", .{ target.host, target.port });
+        }
     }
-    try writer.writeAll("Connection: close\r\n");
+    if (!hasHeader(spec, "Connection")) try writer.writeAll("Connection: close\r\n");
     try writer.writeAll("Accept: */*\r\n");
     try writer.writeAll("User-Agent: PocketRoot/1\r\n");
     if (spec.body.len > 0 or spec.method == .post or spec.method == .put) {
-        try writer.writeAll("Content-Type: application/x-www-form-urlencoded\r\n");
-        try writer.print("Content-Length: {d}\r\n", .{spec.body.len});
+        if (!hasHeader(spec, "Content-Type")) try writer.writeAll("Content-Type: application/x-www-form-urlencoded\r\n");
+        if (!hasHeader(spec, "Content-Length")) try writer.print("Content-Length: {d}\r\n", .{spec.body.len});
+    }
+    for (spec.headers) |header| {
+        try writer.print("{s}: {s}\r\n", .{ header.name, header.value });
     }
     try writer.writeAll("\r\n");
     try writer.writeAll(spec.body);
@@ -415,5 +450,55 @@ test "http spec rejects header and path injection" {
     ));
     try std.testing.expectError(error.InvalidTarget, parseSpec(std.testing.allocator,
         \\{"kind":"http","target":"127.0.0.1","path":"/"}
+    ));
+}
+
+fn serveHeader(server: *std.Io.net.Server, io: std.Io) std.Io.Cancelable!void {
+    const stream = server.accept(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+    defer stream.close(io);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(io, &reader_buffer);
+    var request: [2048]u8 = undefined;
+    var slices = [_][]u8{request[0..]};
+    const count = reader.interface.readVec(&slices) catch return;
+    const has_header = std.mem.indexOf(u8, request[0..count], "X-Test: yes\r\n") != null;
+    const response = if (has_header)
+        "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nheader-ok"
+    else
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\ndenied";
+    tcp_scan.writeSmallRequestWithTimeout(io, stream, response, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(500),
+        .clock = .awake,
+    } }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+}
+
+test "http probe sends custom headers and uses them in the oracle" {
+    var listen_address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try listen_address.listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+    var group: std.Io.Group = .init;
+    defer group.cancel(std.testing.io);
+    try group.concurrent(std.testing.io, serveHeader, .{ &server, std.testing.io });
+    const port = server.socket.address.getPort();
+
+    const spec = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{"kind":"http","target":"127.0.0.1:{d}","method":"GET","path":"/","headers":[{{"name":"X-Test","value":"yes"}}],"expect_status":200,"expect_body":"header-ok"}}
+    , .{port});
+    defer std.testing.allocator.free(spec);
+    var result = try execute(std.testing.allocator, std.testing.io, spec);
+    defer result.deinit();
+    try group.await(std.testing.io);
+    try std.testing.expect(std.mem.indexOf(u8, result.data, "oracle=pass") != null);
+}
+
+test "http spec rejects header injection" {
+    try std.testing.expectError(error.InvalidHeader, parseSpec(std.testing.allocator,
+        \\{"kind":"http","target":"127.0.0.1:80","headers":[{"name":"X-Test: evil","value":"1"}]}
     ));
 }

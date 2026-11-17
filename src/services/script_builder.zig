@@ -56,6 +56,7 @@ pub const verb_map = [_]VerbMapping{
     .{ .verb = "net.tls", .kind = .network, .operation = .analyze },
     .{ .verb = "net.scan", .kind = .network, .operation = .analyze },
     .{ .verb = "net.http", .kind = .network, .operation = .analyze },
+    .{ .verb = "net.udp", .kind = .network, .operation = .analyze },
     .{ .verb = "fs.read", .kind = .storage, .operation = .read },
     .{ .verb = "fs.write", .kind = .storage, .operation = .write },
 };
@@ -148,7 +149,13 @@ const Compiler = struct {
             return error.InvalidOptionValue;
         }
         const is_http = std.mem.eql(u8, cap.verb, "net.http");
-        const http_payload = if (is_http) try httpSpec(self.a, call.options) else "";
+        const is_udp = std.mem.eql(u8, cap.verb, "net.udp");
+        const http_payload = if (is_http)
+            try httpSpec(self.a, call.options)
+        else if (is_udp)
+            try udpSpec(self.a, call.options)
+        else
+            "";
         try self.addAction(
             id,
             .{
@@ -157,8 +164,8 @@ const Compiler = struct {
                 .kind = mapping.kind,
                 .operation = mapping.operation,
                 .region = try regionOption(cap, options.policy_region),
-                .payload = if (is_http) http_payload else payload_literal orelse "",
-                .payload_ref = if (is_http) null else payload_ref,
+                .payload = if (is_http or is_udp) http_payload else payload_literal orelse "",
+                .payload_ref = if (is_http or is_udp) null else payload_ref,
                 .active_authorized = options.authorize_active,
                 .bind = bind,
             },
@@ -392,15 +399,15 @@ const EmitSpec = struct { emit: automation.Emit, payload: []const u8 };
 /// parses it and runs services/http_probe. Keeping the spec in the payload means the
 /// capability kernel, audit and workflow stay unchanged.
 fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
-    const target = stringOption(options, "target") orelse return error.InvalidOptionValue;
-    const method = stringOption(options, "method") orelse "GET";
-    const path = stringOption(options, "path") orelse "/";
-    const body = stringOption(options, "body") orelse "";
+    const target = (try literalString(options, "target")) orelse return error.InvalidOptionValue;
+    const method = (try literalString(options, "method")) orelse "GET";
+    const path = (try literalString(options, "path")) orelse "/";
+    const body = (try literalString(options, "body")) orelse "";
 
     var timeout_ms: u32 = 2000;
     if (numberOption(options, "timeout")) |value| {
         timeout_ms = value;
-    } else if (stringOption(options, "timeout")) |text| {
+    } else if (try literalString(options, "timeout")) |text| {
         timeout_ms = parseHttpDuration(text) orelse return error.InvalidOptionValue;
     }
     if (timeout_ms < 50 or timeout_ms > 5000) return error.InvalidOptionValue;
@@ -409,8 +416,24 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
     if (numberOption(options, "expect_status")) |value| {
         if (value > 65535) return error.InvalidOptionValue;
         expect_status = @intCast(value);
-    } else if (stringOption(options, "expect_status")) |text| {
+    } else if (try literalString(options, "expect_status")) |text| {
         expect_status = std.fmt.parseInt(u16, text, 10) catch return error.InvalidOptionValue;
+    }
+
+    const HeaderWire = struct { name: []const u8, value: []const u8 };
+    var header_list: std.ArrayList(HeaderWire) = .empty;
+    defer header_list.deinit(a);
+    if (try literalString(options, "headers")) |text| {
+        var pieces = std.mem.splitScalar(u8, text, ';');
+        while (pieces.next()) |raw| {
+            const piece = std.mem.trim(u8, raw, " \t");
+            if (piece.len == 0) continue;
+            const colon = std.mem.indexOfScalar(u8, piece, ':') orelse return error.InvalidOptionValue;
+            const name = std.mem.trim(u8, piece[0..colon], " \t");
+            const value = std.mem.trim(u8, piece[colon + 1 ..], " \t");
+            if (name.len == 0 or value.len == 0) return error.InvalidOptionValue;
+            try header_list.append(a, .{ .name = name, .value = value });
+        }
     }
 
     const Wire = struct {
@@ -419,6 +442,7 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
         method: []const u8,
         path: []const u8,
         body: []const u8,
+        headers: []const HeaderWire,
         timeout_ms: u32,
         expect_status: ?u16,
         expect_body: []const u8,
@@ -436,10 +460,50 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
         .method = method,
         .path = path,
         .body = body,
+        .headers = header_list.items,
         .timeout_ms = timeout_ms,
         .expect_status = expect_status,
-        .expect_body = stringOption(options, "expect_body") orelse "",
-        .expect_absent = stringOption(options, "expect_absent") orelse "",
+        .expect_body = (try literalString(options, "expect_body")) orelse "",
+        .expect_absent = (try literalString(options, "expect_absent")) orelse "",
+    }) catch return error.OutOfMemory;
+    return output.toOwnedSlice() catch error.OutOfMemory;
+}
+
+fn udpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const target = (try literalString(options, "target")) orelse return error.InvalidOptionValue;
+    const data = (try literalString(options, "data")) orelse return error.InvalidOptionValue;
+    var timeout_ms: u32 = 2000;
+    if (numberOption(options, "timeout")) |value| {
+        timeout_ms = value;
+    } else if (try literalString(options, "timeout")) |text| {
+        timeout_ms = parseHttpDuration(text) orelse return error.InvalidOptionValue;
+    }
+    if (timeout_ms < 50 or timeout_ms > 5000) return error.InvalidOptionValue;
+    var expect_min_bytes: ?u32 = null;
+    if (numberOption(options, "expect_min_bytes")) |value| expect_min_bytes = value;
+    const Wire = struct {
+        kind: []const u8,
+        target: []const u8,
+        data: []const u8,
+        timeout_ms: u32,
+        expect_min_bytes: ?u32,
+        expect_body: []const u8,
+        expect_absent: []const u8,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{
+        .kind = "udp",
+        .target = target,
+        .data = data,
+        .timeout_ms = timeout_ms,
+        .expect_min_bytes = expect_min_bytes,
+        .expect_body = (try literalString(options, "expect_body")) orelse "",
+        .expect_absent = (try literalString(options, "expect_absent")) orelse "",
     }) catch return error.OutOfMemory;
     return output.toOwnedSlice() catch error.OutOfMemory;
 }
@@ -548,6 +612,19 @@ fn regionOption(cap: script.Cap, policy_region: []const u8) Error![]const u8 {
     // No region option: active subghz requests are denied by the kernel unless the
     // policy and request both carry a region, so an empty value stays safe.
     return "";
+}
+
+/// Rejects references and non-string values for options the HTTP compiler needs as
+/// literals; silently falling back to a default would change the request.
+fn literalString(options: []const script.Option, key: []const u8) Error!?[]const u8 {
+    for (options) |option| {
+        if (!std.mem.eql(u8, option.key, key)) continue;
+        return switch (option.value) {
+            .string => |value| value,
+            else => error.InvalidOptionValue,
+        };
+    }
+    return null;
 }
 
 fn stringOption(options: []const script.Option, key: []const u8) ?[]const u8 {
@@ -1128,6 +1205,7 @@ test "net.http compiles to a json request spec" {
         \\            target = "127.0.0.1:8080",
         \\            method = "GET",
         \\            path = "/cgi-bin/.%2e/etc/passwd",
+        \\            headers = "X-Test: yes; X-Other: 1",
         \\            expect_status = 200,
         \\            expect_body = "root:x:0:0",
         \\        }
@@ -1145,5 +1223,33 @@ test "net.http compiles to a json request spec" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"http\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"target\":\"127.0.0.1:8080\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"expect_status\":200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "X-Test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "X-Other") != null);
     try std.testing.expect(compiled.actions[1].fail != null);
+}
+
+test "net.udp compiles to a json datagram spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "udp" do
+        \\    use "pack.net"
+        \\    cap probe = net.udp
+        \\    step "probe" do
+        \\        response = probe {
+        \\            target = "127.0.0.1:11211",
+        \\            data = "stats\r\n",
+        \\            expect_min_bytes = 16,
+        \\        }
+        \\        if response.oracle ~= "pass" then
+        \\            fail "no amplification"
+        \\        end
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    const payload = compiled.actions[0].payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"udp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "stats") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"expect_min_bytes\":16") != null);
 }

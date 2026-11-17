@@ -3,6 +3,7 @@ const capability = @import("../core/capability.zig");
 const fixtures = @import("fixtures.zig");
 const tcp_scan = @import("../services/tcp_scan.zig");
 const http_probe = @import("../services/http_probe.zig");
+const udp_probe = @import("../services/udp_probe.zig");
 
 pub const Backend = struct {
     supported: [std.meta.fields(capability.Kind).len]bool = @splat(false),
@@ -34,6 +35,9 @@ pub const Backend = struct {
                 };
                 if (http_probe.isHttpSpec(request.payload)) {
                     return http_probe.execute(allocator, io, request.payload);
+                }
+                if (udp_probe.isUdpSpec(request.payload)) {
+                    return udp_probe.execute(allocator, io, request.payload);
                 }
                 const text = try liveScan(allocator, io, request.payload);
                 defer allocator.free(text);

@@ -197,10 +197,12 @@ A response payload starts with the `capability.Status` byte followed by the data
 The DSL compiles a `net.http` call into a JSON payload carried by the network capability:
 
 ```json
-{"kind":"http","target":"127.0.0.1:8080","method":"GET","path":"/cgi-bin/.%2e/etc/passwd","body":"","timeout_ms":2000,"expect_status":200,"expect_body":"root:x:0:0","expect_absent":""}
+{"kind":"http","target":"127.0.0.1:8080","method":"GET","path":"/cgi-bin/.%2e/etc/passwd","body":"","headers":[],"timeout_ms":2000,"expect_status":200,"expect_body":"root:x:0:0","expect_absent":""}
 ```
 
-The live backend dispatches it to `services/http_probe.zig`; the capability kernel, audit
+A `net.udp` call compiles to `{"kind":"udp","target":...,"data":...,"timeout_ms":...,"expect_min_bytes":...,"expect_body":...,"expect_absent":...}`.
+
+The live backend dispatches HTTP to `services/http_probe.zig`, UDP to `services/udp_probe.zig`; the capability kernel, audit
 subject and workflow are unchanged. The probe result is a key=value payload with
 `status`, `status_line`, `body_bytes`, `body_prefix`, `oracle` and `oracle_reason`.
 
@@ -222,7 +224,7 @@ subject and workflow are unchanged. The probe result is a key=value payload with
 | `pocketroot.ledger.v1` | `services/control.zig` | Hash-chained campaign ledger entry |
 | `pocketroot.surface.v1` | `services/surface.zig` | Attack-surface report and candidate actions |
 | `pocketroot.reproduction.v1` | `samples/reproductions/*/record.json` | One reproduction record consumed by `reproduce` |
-| `pocketroot.reproduction.evidence.v1` | `cli/main.zig` | One reproduction run and its observed outcome |
+| `pocketroot.reproduction.evidence.v1` | `cli/main.zig` | One reproduction run, observed outcome and approval id when gated |
 
 The schema identifier is the compatibility boundary. Changing fields without bumping the
 version breaks consumers; `UnsupportedCatalogSchema` reports a mismatch.

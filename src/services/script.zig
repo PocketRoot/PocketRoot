@@ -273,15 +273,16 @@ const verbs = [_]VerbInfo{
     .{ .name = "net.tls", .active = false },
     .{ .name = "net.scan", .active = false },
     .{ .name = "net.http", .active = false },
+    .{ .name = "net.udp", .active = false },
     .{ .name = "fs.read", .active = false },
     .{ .name = "fs.write", .active = true },
 };
 
 const option_keys = [_][]const u8{
-    "region",      "on_error",      "into",   "payload", "confirm",
-    "tag",         "note",          "path",   "timeout", "message",
-    "severity",    "target",        "method", "body",    "expect_status",
-    "expect_body", "expect_absent",
+    "region",      "on_error",      "into",    "payload", "confirm",
+    "tag",         "note",          "path",    "timeout", "message",
+    "severity",    "target",        "method",  "body",    "expect_status",
+    "expect_body", "expect_absent", "headers", "data",    "expect_min_bytes",
 };
 
 fn verbInfo(name: []const u8) ?VerbInfo {
@@ -298,7 +299,7 @@ const packs = [_]PackEntry{
     .{ .name = "pack.rf", .verbs = &.{ "subghz.read", "subghz.transmit", "lfrfid.read", "ibutton.read" } },
     .{ .name = "pack.nfc", .verbs = &.{ "nfc.read", "nfc.emulate" } },
     .{ .name = "pack.ir", .verbs = &.{ "ir.receive", "ir.transmit" } },
-    .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan", "net.http" } },
+    .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan", "net.http", "net.udp" } },
     .{ .name = "pack.fs", .verbs = &.{ "fs.read", "fs.write" } },
 };
 

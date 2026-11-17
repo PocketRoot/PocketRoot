@@ -77,7 +77,7 @@ Every verb becomes a `capability.Request` (see
 
 | DSL verb | Kind and operation | Active authorisation |
 |---|---|---|
-| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `net.http`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
+| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
 | `subghz.transmit` | `subghz` + `transmit` | yes, with matching region |
 | `ir.transmit` | `infrared` + `transmit` | yes |
 | `nfc.emulate` | `nfc` + `emulate` | yes |
@@ -94,7 +94,7 @@ one pack:
 | `pack.rf` | `subghz.read`, `subghz.transmit`, `lfrfid.read`, `ibutton.read` |
 | `pack.nfc` | `nfc.read`, `nfc.emulate` |
 | `pack.ir` | `ir.receive`, `ir.transmit` |
-| `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http` |
+| `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp` |
 | `pack.fs` | `fs.read`, `fs.write` |
 
 A `cap` whose pack was not imported fails with `PackNotImported`; an unknown pack fails
@@ -106,7 +106,8 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 |---|---|
 | `on_error` | `"abort"`, `"continue"` or `"retry(n)"`; retry reuses the workflow attempt counter |
 | `fail "message"` | a deliberate failure: emits an `error` finding, fails the step and stops the run |
-| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `body`, `timeout`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `oracle`, `oracle_reason` |
+| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `headers`, `body`, `timeout`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `oracle`, `oracle_reason` |
+| `net.udp` | one datagram: `target`, `data`, `timeout`, `expect_min_bytes`, `expect_body`, `expect_absent`; the result binds `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason` |
 | Scoping | `sig = ...` is local to the step; crossing steps requires `out <name>` |
 | Variables | A successful call binds its result payload as `name` and, for each `key=value` line, as `name.key` |
 | References | `payload`, `severity`, `message`, `tag` and `note` accept a variable reference. The root must be visible at parse time; a path that is visible but has no runtime field fails the step with `UnresolvedReference` instead of sending or emitting an empty value |
@@ -287,3 +288,30 @@ The backend returns `succeeded` with `oracle=pass|fail` so the script can decide
 ends the workflow as failed. The `reproduce` command renders `{{target}}`, runs a script
 live and writes `pocketroot.reproduction.evidence.v1`; see
 [reproductions](reproductions.md).
+
+## 12. Datagram probes
+
+`net.udp` sends one datagram and waits for one response. It is the primitive for
+amplification and reflection checks: the oracle can require a minimum response size,
+a marker in the payload, or the absence of a marker.
+
+```lua
+script "udp-amplification" do
+    use "pack.net"
+    cap probe = net.udp
+    step "probe" do
+        response = probe {
+            target = "127.0.0.1:11211",
+            data = "stats\r\n",
+            expect_min_bytes = 16,
+        }
+        if response.oracle ~= "pass" then
+            fail "no amplified datagram observed"
+        end
+        emit finding { severity = "medium", message = "datagram amplification observed", tag = response.bytes }
+    end
+end
+```
+
+The report includes `ratio` (response bytes divided by request bytes); a response at or
+above the requested minimum is only a hint, not proof of spoofability.

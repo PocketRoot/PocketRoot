@@ -26,9 +26,20 @@ research repository at `18_CVE` is read-only and none of its scripts are execute
 | `target` | host:port rendered into the script's `{{target}}` placeholder |
 | `script` | path relative to the record |
 | `expected` | `vulnerable` or `fixed`; used to name the observed outcome |
-| `kind` | `validate` for read-only proofs; `exploit` records are refused by this build |
+| `kind` | `validate` for read-only proofs; `exploit` records require a campaign approval |
 
 The record does not contain a payload or a shell command. The probe is the DSL script.
+
+For an exploit record, the campaign path is mandatory:
+
+```bash
+PocketRoot campaign approve-repro samples/reproductions/.../record.json \
+    --reason "ticket SEC-1" --confirm CVE-...
+PocketRoot reproduce .../record.json --campaign .pocketroot --evidence repro.json
+```
+
+The approval binds the record's CVE, target and script bytes; the runner consumes it
+before staging the script and records `action_id`/`approval_id` in the evidence.
 
 ## 2. Runner
 
@@ -68,7 +79,7 @@ invalid. `--json` prints the evidence document instead of the summary.
 - `probe.pk`: GET `/cgi-bin/.%2e/.%2e/.%2e/.%2e/etc/passwd`, expects 200 and
   `root:x:0:0`; fails with a message otherwise.
 - `control-fixed.pk`: same path, expects 400 and the marker absent.
-- `record.json` and `README.md`.
+- `record.json`, `record-exploit.json` (same probe, `kind: exploit`) and `README.md`.
 
 `samples/reproductions/CVE-2021-42013/` is the same shape for the double-encoded path
 (`.%%32%65`), targeting httpd 2.4.50.
@@ -82,8 +93,8 @@ containers.
 | Not provided | Consequence |
 |---|---|
 | No Docker orchestration | the operator starts the lab target; the runner only sends requests |
-| No exploit executor | `kind: "exploit"` is refused; the HTTP POST/body primitive exists, but no payload generator or session |
-| No scope gate yet | `reproduce` is a validation command; exploit records are refused until the campaign gate carries them |
+| No exploit executor | exploit records are gated, but there is no payload generator, session or post-exploitation step |
+| Validation records bypass scope | `kind: "validate"` runs without a campaign; only exploit records are scope/approval gated |
 | HTTP only | listener, crash and compile-rejection oracles need separate primitives |
 | No provenance verification | the record is a rewrite, not a byte copy of the research artifact |
 

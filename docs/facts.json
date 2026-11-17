@@ -3,11 +3,11 @@
   "protocols": 13,
   "kinds": 20,
   "operations": 9,
-  "dsl_verbs": 14,
+  "dsl_verbs": 15,
   "dsl_packs": 5,
-  "test_blocks": 331,
+  "test_blocks": 337,
   "smoke_checks": 15,
-  "sample_files": 31,
+  "sample_files": 32,
   "catalogue_v1": 9,
   "catalogue_v2": 9064
 }
