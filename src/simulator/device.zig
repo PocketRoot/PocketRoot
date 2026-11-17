@@ -4,6 +4,8 @@ const fixtures = @import("fixtures.zig");
 const tcp_scan = @import("../services/tcp_scan.zig");
 const http_probe = @import("../services/http_probe.zig");
 const udp_probe = @import("../services/udp_probe.zig");
+const exploit_plan = @import("../services/exploit_plan.zig");
+const exploit_execute = @import("../services/exploit_execute.zig");
 
 pub const Backend = struct {
     supported: [std.meta.fields(capability.Kind).len]bool = @splat(false),
@@ -27,6 +29,18 @@ pub const Backend = struct {
         const self: *Backend = @ptrCast(@alignCast(context));
         if (!self.supported[@intFromEnum(request.kind)]) {
             return capability.Result.init(allocator, .unsupported, "simulator capability unavailable");
+        }
+        if (request.kind == .exploit) {
+            const io = self.io orelse {
+                return capability.Result.init(allocator, .failed, "exploit analysis needs an Io");
+            };
+            if (request.operation == .analyze) {
+                return exploit_plan.execute(allocator, io, request.payload);
+            }
+            if (request.operation == .manage) {
+                return exploit_execute.execute(allocator, io, request.payload);
+            }
+            return capability.Result.init(allocator, .unsupported, "unsupported exploit operation");
         }
         if (request.kind == .network) {
             if (self.live) {

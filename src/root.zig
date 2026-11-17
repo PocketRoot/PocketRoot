@@ -49,6 +49,9 @@ pub const services = struct {
     pub const udp_probe = @import("services/udp_probe.zig");
     pub const exploit = @import("services/exploit.zig");
     pub const chain = @import("services/chain.zig");
+    pub const exploit_plan = @import("services/exploit_plan.zig");
+    pub const chain_exec = @import("services/chain_exec.zig");
+    pub const exploit_execute = @import("services/exploit_execute.zig");
     pub const tls_inspect = @import("services/tls_inspect.zig");
     pub const tcp_scan = @import("services/tcp_scan.zig");
     pub const workflow = @import("services/workflow.zig");
@@ -191,6 +194,9 @@ test {
         services.udp_probe,
         services.exploit,
         services.chain,
+        services.exploit_plan,
+        services.chain_exec,
+        services.exploit_execute,
         services.tls_inspect,
         services.tcp_scan,
         services.workflow,

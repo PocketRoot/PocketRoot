@@ -57,6 +57,8 @@ pub const verb_map = [_]VerbMapping{
     .{ .verb = "net.scan", .kind = .network, .operation = .analyze },
     .{ .verb = "net.http", .kind = .network, .operation = .analyze },
     .{ .verb = "net.udp", .kind = .network, .operation = .analyze },
+    .{ .verb = "exploit.plan", .kind = .exploit, .operation = .analyze },
+    .{ .verb = "exploit.execute", .kind = .exploit, .operation = .manage },
     .{ .verb = "fs.read", .kind = .storage, .operation = .read },
     .{ .verb = "fs.write", .kind = .storage, .operation = .write },
 };
@@ -150,12 +152,18 @@ const Compiler = struct {
         }
         const is_http = std.mem.eql(u8, cap.verb, "net.http");
         const is_udp = std.mem.eql(u8, cap.verb, "net.udp");
+        const is_exploit_plan = std.mem.eql(u8, cap.verb, "exploit.plan");
+        const is_exploit_execute = std.mem.eql(u8, cap.verb, "exploit.execute");
         const http_compiled = if (is_http)
             try httpSpec(self.a, call.options)
         else
             HttpCompiled{ .payload = "", .path_ref = null };
         const http_payload = if (is_udp)
             try udpSpec(self.a, call.options)
+        else if (is_exploit_plan)
+            try exploitPlanSpec(self.a, call.options)
+        else if (is_exploit_execute)
+            try exploitExecuteSpec(self.a, call.options)
         else
             http_compiled.payload;
         try self.addAction(
@@ -166,8 +174,8 @@ const Compiler = struct {
                 .kind = mapping.kind,
                 .operation = mapping.operation,
                 .region = try regionOption(cap, options.policy_region),
-                .payload = if (is_http or is_udp) http_payload else payload_literal orelse "",
-                .payload_ref = if (is_http or is_udp) null else payload_ref,
+                .payload = if (is_http or is_udp or is_exploit_plan or is_exploit_execute) http_payload else payload_literal orelse "",
+                .payload_ref = if (is_http or is_udp or is_exploit_plan or is_exploit_execute) null else payload_ref,
                 .path_ref = http_compiled.path_ref,
                 .active_authorized = options.authorize_active,
                 .bind = bind,
@@ -537,6 +545,62 @@ fn udpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
         .expect_min_bytes = expect_min_bytes,
         .expect_body = (try literalString(options, "expect_body")) orelse "",
         .expect_absent = (try literalString(options, "expect_absent")) orelse "",
+    }) catch return error.OutOfMemory;
+    return output.toOwnedSlice() catch error.OutOfMemory;
+}
+
+fn exploitPlanSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const observations = (try literalString(options, "observations")) orelse "";
+    const surface = (try literalString(options, "surface")) orelse "";
+    if (observations.len == 0 and surface.len == 0) return error.InvalidOptionValue;
+    if (observations.len > 0 and surface.len > 0) return error.InvalidOptionValue;
+    const records = (try literalString(options, "records")) orelse "samples/exploits";
+    const target = (try literalString(options, "target")) orelse "";
+    const Wire = struct {
+        kind: []const u8,
+        mode: []const u8,
+        observations: []const u8,
+        surface: []const u8,
+        records: []const u8,
+        target: []const u8,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{
+        .kind = "exploit",
+        .mode = "plan",
+        .observations = observations,
+        .surface = surface,
+        .records = records,
+        .target = target,
+    }) catch return error.OutOfMemory;
+    return output.toOwnedSlice() catch error.OutOfMemory;
+}
+
+fn exploitExecuteSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const plan = (try literalString(options, "plan")) orelse return error.InvalidOptionValue;
+    const campaign = (try literalString(options, "campaign")) orelse return error.InvalidOptionValue;
+    const Wire = struct {
+        kind: []const u8,
+        mode: []const u8,
+        plan: []const u8,
+        campaign: []const u8,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{
+        .kind = "exploit",
+        .mode = "run",
+        .plan = plan,
+        .campaign = campaign,
     }) catch return error.OutOfMemory;
     return output.toOwnedSlice() catch error.OutOfMemory;
 }
@@ -1324,4 +1388,46 @@ test "net.http path can reference a captured field" {
     try std.testing.expect(compiled.actions.len >= 2);
     try std.testing.expectEqualStrings("first.captured", compiled.actions[1].path_ref.?);
     try std.testing.expect(std.mem.indexOf(u8, compiled.actions[1].payload, "__POCKETROOT_PATH_REF__") != null);
+}
+
+test "exploit.plan compiles into a surface analysis spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "plan" do
+        \\    use "pack.exploit"
+        \\    cap plan = exploit.plan
+        \\    step "plan" do
+        \\        result = plan {
+        \\            surface = "samples/campaign/surface-lab.json",
+        \\            records = "samples/exploits",
+        \\        }
+        \\        out result
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    const payload = compiled.actions[0].payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"exploit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"mode\":\"plan\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "surface-lab.json") != null);
+}
+
+test "exploit.execute compiles into an active kernel run spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "run" do
+        \\    use "pack.exploit"
+        \\    cap exec = exploit.execute
+        \\    step "run" do
+        \\        result = exec { plan = "chain.json", campaign = ".pocketroot" }
+        \\        out result
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    try std.testing.expectEqual(capability.Kind.exploit, compiled.actions[0].kind);
+    try std.testing.expectEqual(capability.Operation.manage, compiled.actions[0].operation);
+    try std.testing.expect(std.mem.indexOf(u8, compiled.actions[0].payload, "\"mode\":\"run\"") != null);
 }

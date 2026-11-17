@@ -95,6 +95,7 @@ one pack:
 | `pack.nfc` | `nfc.read`, `nfc.emulate` |
 | `pack.ir` | `ir.receive`, `ir.transmit` |
 | `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp` |
+| `pack.exploit` | `exploit.plan`, `exploit.execute` |
 | `pack.fs` | `fs.read`, `fs.write` |
 
 A `cap` whose pack was not imported fails with `PackNotImported`; an unknown pack fails
@@ -108,6 +109,8 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 | `fail "message"` | a deliberate failure: emits an `error` finding, fails the step and stops the run |
 | `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `headers`, `body`, `timeout`, `capture_name`, `capture_prefix`, `capture_suffix`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `captured`, `capture_found`, `oracle`, `oracle_reason` |
 | `net.udp` | one datagram: `target`, `data`, `timeout`, `expect_min_bytes`, `expect_body`, `expect_absent`; the result binds `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason` |
+| `exploit.plan` | passive chain analysis: `observations` or `surface`, `records`, `target`; the result binds the `pocketroot.chain.v1` JSON |
+| `exploit.execute` | active, campaign-gated chain execution: `plan`, `campaign`; the result binds `pocketroot.chain.evidence.v1` |
 | Scoping | `sig = ...` is local to the step; crossing steps requires `out <name>` |
 | Variables | A successful call binds its result payload as `name` and, for each `key=value` line, as `name.key` |
 | References | `payload`, `severity`, `message`, `tag` and `note` accept a variable reference. The root must be visible at parse time; a path that is visible but has no runtime field fails the step with `UnresolvedReference` instead of sending or emitting an empty value |
@@ -350,3 +353,49 @@ command execution and effect evidence belong to `pocketroot.exploit.v1` and
 **Limit:** DSL strings have no escape syntax, so a delimiter that itself contains `"`
 cannot be expressed in a `capture_prefix`/`capture_suffix`; use the JSON exploit record
 for those protocols.
+
+## 14. Kernel exploit-chain analysis
+
+`exploit.plan` is a kernel capability (`exploit` / `analyze`), not a network
+request. It reads observations or a surface report, matches exploit records and returns a
+`pocketroot.chain.v1` plan. It sends no traffic and needs no approval; execution still
+goes through `chain approve` + `chain run`.
+
+```lua
+script "plan" do
+    use "pack.exploit"
+    cap plan = exploit.plan
+    step "plan" do
+        result = plan {
+            surface = "samples/campaign/surface-lab.json",
+            records = "samples/exploits",
+        }
+        out result
+    end
+end
+```
+
+The audit line is `exploit analyze`; the plan is bound as a variable, so a script can
+inspect its id/steps before a human approval.
+
+### 14.1 Executing a chain from a script
+
+`exploit.execute` maps to `Kind.exploit` + `Operation.manage` (active). The script must
+run with `--authorize-active`, and the plan must already have a live campaign approval:
+
+```lua
+script "run-chain" do
+    use "pack.exploit"
+    cap exec = exploit.execute
+    step "run" do
+        result = exec {
+            plan = "chain.json",
+            campaign = ".pocketroot",
+        }
+        out result
+    end
+end
+```
+
+The audit line is `exploit manage`; a missing/used/expired approval is audited as
+`denied`, not as a successful script. The kernel does not mint approvals.

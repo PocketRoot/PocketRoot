@@ -30,6 +30,7 @@ The I/O column states where the work actually happens.
 | `chain plan --observations <file>` | any | filesystem | `services/chain.zig` | 1-8 matched records, digest-bound plan | no match: exit 1 |
 | `chain approve <plan.json>` | any | filesystem | `services/control.zig` | plan bytes + target, one approval | disarmed or outside scope: exit 1 |
 | `chain run <plan.json>` | any | real TCP | `services/chain.zig` + `exploit.zig` | STOP before/after each step, record digest check | changed record/plan or failed step: exit 1 |
+| `exploit.execute` (DSL) | active | real TCP | `chain_exec.zig` | kernel active gate + campaign approval | no/used approval: audited denied |
 | `run <app>` | any | simulated | `apps/infrared.zig` | - | `UnknownApp` |
 | `network` | Windows only | real | PowerShell `Get-NetIPConfiguration` | 10 s timeout | `UnsupportedPlatform` |
 | `capture <s> <out> <comp>` | Windows only | real | `pktmon` start/stop/etl2pcap | 1-60 s, 1-64 MB, output <= 80 MiB | refuses overwrite, validates pcapng header and trailer |
@@ -72,7 +73,9 @@ The commands above are exercised by the smoke checks in `build.zig`.
 | `services/http_probe.zig` | Raw HTTP/1.1 request and oracle for reproduction scripts | `net.http` via `script run --live`, `reproduce` |
 | `services/udp_probe.zig` | One datagram and an amplification/size oracle | `net.udp` via `script run --live`, `reproduce` |
 | `services/exploit.zig` | Ordered HTTP exploit steps, capture/extract and effect evidence | `exploit run` |
-| `services/chain.zig` | Observation-to-record matching and digest-bound chain plans | `chain plan/run` |
+| `services/chain.zig` | Observation-to-record matching and digest-bound chain plans | `chain plan/run`, `exploit.plan` |
+| `services/exploit_plan.zig` | Kernel-side passive chain analysis over observations/surface | `exploit.plan` (DSL), `device request exploit analyze` |
+| `services/chain_exec.zig` | Campaign-gated chain execution shared by kernel and CLI | `exploit.execute`, `chain run` |
 
 ## 4. Failure semantics
 

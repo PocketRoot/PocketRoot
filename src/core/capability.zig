@@ -28,6 +28,9 @@ pub const Kind = enum {
     logic,
     power,
     usb_host,
+    /// Local exploit-chain analysis (planning); execution is a separate, campaign-gated
+    /// path. Appended so existing ordinal values stay stable.
+    exploit,
 };
 
 pub const Operation = enum {

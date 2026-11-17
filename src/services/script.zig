@@ -274,16 +274,19 @@ const verbs = [_]VerbInfo{
     .{ .name = "net.scan", .active = false },
     .{ .name = "net.http", .active = false },
     .{ .name = "net.udp", .active = false },
+    .{ .name = "exploit.plan", .active = false },
+    .{ .name = "exploit.execute", .active = true },
     .{ .name = "fs.read", .active = false },
     .{ .name = "fs.write", .active = true },
 };
 
 const option_keys = [_][]const u8{
-    "region",       "on_error",       "into",           "payload", "confirm",
-    "tag",          "note",           "path",           "timeout", "message",
-    "severity",     "target",         "method",         "body",    "expect_status",
-    "expect_body",  "expect_absent",  "headers",        "data",    "expect_min_bytes",
-    "capture_name", "capture_prefix", "capture_suffix",
+    "region",       "on_error",       "into",           "payload",      "confirm",
+    "tag",          "note",           "path",           "timeout",      "message",
+    "severity",     "target",         "method",         "body",         "expect_status",
+    "expect_body",  "expect_absent",  "headers",        "data",         "expect_min_bytes",
+    "capture_name", "capture_prefix", "capture_suffix", "observations", "surface",
+    "records",      "plan",           "campaign",
 };
 
 fn verbInfo(name: []const u8) ?VerbInfo {
@@ -302,6 +305,7 @@ const packs = [_]PackEntry{
     .{ .name = "pack.ir", .verbs = &.{ "ir.receive", "ir.transmit" } },
     .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan", "net.http", "net.udp" } },
     .{ .name = "pack.fs", .verbs = &.{ "fs.read", "fs.write" } },
+    .{ .name = "pack.exploit", .verbs = &.{ "exploit.plan", "exploit.execute" } },
 };
 
 pub fn packKnown(name: []const u8) bool {

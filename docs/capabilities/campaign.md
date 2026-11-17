@@ -142,7 +142,7 @@ Changing the command, file, target or any step invalidates the approval. See
 
 ### 5.3 Chain approvals
 
-`chain approve` binds the plan bytes and target; `chain run` re-checks every record
+`chain approve` binds the plan bytes and target; `chain run` (CLI) and `exploit.execute` (kernel capability, active) re-check every record
 digest, checks STOP before and after each step, consumes the approval before the first
 step and writes `chain-start`, `chain-step` and `chain-result`. This is the single
 approval path for automatic multi-step exploitation.

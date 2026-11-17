@@ -215,7 +215,21 @@ the text between two delimiters; `extract` returns the effect between two delimi
 `effect: command` requires an extract (the runner wraps the command in markers);
 `effect: read_file` falls back to the final response body.
 
-### 4.3 `pocketroot.chain.v1`
+### 4.3 `exploit.plan` capability payload
+
+```json
+{"kind":"exploit","mode":"plan","surface":"samples/campaign/surface-lab.json","records":"samples/exploits","target":""}
+```
+
+It maps to `Kind.exploit` + `Operation.analyze` (passive). A run spec
+`{"kind":"exploit","mode":"run","plan":"chain.json","campaign":".pocketroot"}` maps to
+`Operation.manage` (active): the kernel requires active authorization and the handler
+requires a live plan approval; it never mints one. The result data is the
+`pocketroot.chain.v1` plan. `Operation.manage` on `Kind.exploit` is deliberately
+unsupported by the simulator backend; execution stays on the campaign-gated `chain run`
+path.
+
+### 4.4 `pocketroot.chain.v1`
 
 A plan step records `cve`, `record` path, `effect`, `target` and the record byte
 digest. `chain run` re-hashes each record before executing it. The approval binds the

@@ -81,7 +81,8 @@ the final status, one audit line per capability request, and every emitted findi
 backend and writes evidence with the expected/observed outcome. The sample probes
 CVE-2021-41773's raw path traversal and fails unless the response contains `root:x:0:0`.
 
-`chain plan` matches observations (service/product/version or CVE) against exploit records
+DSL scripts can call `exploit.plan` (passive) to analyze a chain and `exploit.execute`
+(active, campaign-gated) to run an approved plan; `chain plan` matches observations (service/product/version or CVE) against exploit records
 and writes an ordered, digest-bound plan; `chain approve` authorises the plan once and
 `chain run` executes every step, checking STOP between steps. `exploit run` is the effect layer: an exploit record executes ordered HTTP steps, captures
 values such as a form build id, extracts command output between markers and writes
