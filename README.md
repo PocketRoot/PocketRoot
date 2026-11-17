@@ -61,6 +61,10 @@ PocketRoot chain run chain.json --campaign .pocketroot --evidence chain-evidence
 PocketRoot campaign approve-adaptive goal.json --reason "ticket ADAPT-1" --confirm ADAPT-DEMO
 PocketRoot chain adaptive goal.json --campaign .pocketroot --evidence adaptive.json
 
+# multi-target: one approval per target, bounded concurrency, isolated results
+PocketRoot fleet approve fleet.json --target 127.0.0.1:8080 --reason "ticket FLEET-1" --confirm 127.0.0.1:8080
+PocketRoot fleet run fleet.json --campaign .pocketroot --concurrency 2 --evidence fleet.json
+
 # scope -> read-only surface -> human approval with a configurable TTL -> gated dry run
 PocketRoot campaign init --scope samples/campaign/scope.json
 PocketRoot campaign arm

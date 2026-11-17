@@ -76,6 +76,22 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "fleet")) {
+        if (args.len < 3) {
+            try stdout.print("usage: fleet approve|run ...\n", .{});
+            return error.InvalidArguments;
+        }
+        if (std.mem.eql(u8, args[2], "approve")) {
+            try runFleetApproveCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "run")) {
+            try runFleetRunCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
+        return error.InvalidArguments;
+    }
+
     if (std.mem.eql(u8, args[1], "chain")) {
         if (args.len < 3) {
             try stdout.print("usage: chain plan|approve|run ...\n", .{});
@@ -1017,6 +1033,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  chain approve <plan.json> --reason <text> --confirm <CHAIN-ID>
         \\  chain run <plan.json> --campaign <dir> [--evidence <path>]
         \\  chain adaptive <goal.json> --campaign <dir> [--evidence <path>]
+        \\  fleet approve <fleet.json> --target <target> --reason <text> --confirm <target>
+        \\  fleet run <fleet.json> --campaign <dir> [--concurrency N] [--evidence <path>]
         \\  campaign approve-adaptive <goal.json> --reason <text> --confirm <GOAL-ID>
         \\  campaign approve-exploit <record.json> --reason <text> --confirm <CVE> [--param k=v]
         \\                       Run a PocketRoot reproduction record against its target
@@ -2525,6 +2543,8 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "chain run") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "chain adaptive") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-adaptive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "fleet approve") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "fleet run") != null);
 }
 
 const campaign_default_dir = ".pocketroot";
@@ -4734,4 +4754,124 @@ fn runAdaptiveCommand(
     }
     if (json_output) try writer.writeAll(evidence.written());
     if (!std.mem.eql(u8, execution.status, "succeeded")) return error.CommandFailed;
+}
+
+fn runFleetApproveCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var fleet_path: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var reason: ?[]const u8 = null;
+    var confirm: ?[]const u8 = null;
+    var operator: []const u8 = "operator";
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--target") and index + 1 < raw.len) {
+            target = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--reason") and index + 1 < raw.len) {
+            reason = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--confirm") and index + 1 < raw.len) {
+            confirm = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--operator") and index + 1 < raw.len) {
+            operator = raw[index + 1];
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (fleet_path != null) return error.InvalidArguments;
+            fleet_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = fleet_path orelse {
+        try writer.print("usage: fleet approve <fleet.json> --target <target> --reason <text> --confirm <target>\n", .{});
+        return error.InvalidArguments;
+    };
+    const chosen_target = target orelse return error.InvalidArguments;
+    const why = reason orelse return error.InvalidArguments;
+    const typed = confirm orelse return error.InvalidArguments;
+    if (!std.mem.eql(u8, typed, chosen_target)) {
+        try writer.print("confirmation does not match {s}; nothing approved\n", .{chosen_target});
+        return error.InvalidArguments;
+    }
+    var approval = PocketRoot.services.fleet.approve(allocator, io, path, dir, chosen_target, operator, why) catch |err| {
+        try writer.print("fleet approval refused: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    try writer.print("approved {s} on {s}\napproval {s} expires at {d}\n", .{
+        approval.action_id, approval.target, approval.id, approval.expires_at_unix,
+    });
+}
+
+fn runFleetRunCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var fleet_path: ?[]const u8 = null;
+    var campaign_dir: ?[]const u8 = null;
+    var evidence_path: ?[]const u8 = null;
+    var json_output = false;
+    var concurrency: ?u8 = null;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--campaign") and index + 1 < raw.len) {
+            campaign_dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
+            evidence_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--concurrency") and index + 1 < raw.len) {
+            concurrency = std.fmt.parseInt(u8, raw[index + 1], 10) catch return error.InvalidArguments;
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (fleet_path != null) return error.InvalidArguments;
+            fleet_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = fleet_path orelse {
+        try writer.print("usage: fleet run <fleet.json> --campaign <dir> [--concurrency N] [--evidence <path>]\n", .{});
+        return error.InvalidArguments;
+    };
+    const dir = campaign_dir orelse return error.InvalidArguments;
+    var execution = PocketRoot.services.fleet.run(allocator, io, path, dir, concurrency) catch |err| {
+        try writer.print("fleet run failed: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer execution.deinit();
+    try writer.print("fleet {s}: {d} target(s)\n", .{ execution.fleet_id, execution.outcomes.len });
+    var all_succeeded = true;
+    for (execution.outcomes) |outcome| {
+        try writer.print("  {s}: {s}\n", .{ outcome.target, outcome.status });
+        if (!std.mem.eql(u8, outcome.status, "succeeded")) all_succeeded = false;
+    }
+    var evidence = std.Io.Writer.Allocating.init(allocator);
+    defer evidence.deinit();
+    PocketRoot.services.fleet.writeEvidence(&evidence.writer, &execution, campaignNow(io)) catch return error.CommandFailed;
+    if (evidence_path) |file| {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = evidence.written() }) catch |err| {
+            try writer.print("cannot write fleet evidence: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    }
+    if (json_output) try writer.writeAll(evidence.written());
+    if (!all_succeeded) return error.CommandFailed;
 }

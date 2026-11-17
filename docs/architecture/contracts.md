@@ -277,6 +277,8 @@ record template parameter from a fact or a default. This is the adaptive kernel 
 | `pocketroot.chain.evidence.v1` | `chain run` | One chain execution and its per-step outputs |
 | `pocketroot.adaptive.v1` | `chain adaptive` | Modular goal: facts, requires, inputs and captures |
 | `pocketroot.adaptive.evidence.v1` | `chain adaptive` | Actual adaptive path, outputs and final facts |
+| `pocketroot.fleet.v1` | `samples/fleet`/campaign | Targets, goal and concurrency for a multi-target run |
+| `pocketroot.fleet.evidence.v1` | `fleet run` | Per-target status, approval, steps and facts |
 
 The schema identifier is the compatibility boundary. Changing fields without bumping the
 version breaks consumers; `UnsupportedCatalogSchema` reports a mismatch.

@@ -240,12 +240,40 @@ fn eligible(
     return true;
 }
 
+var ledger_mutex: std.Io.Mutex = .init;
+
+fn appendLedgerSerialized(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    campaign_dir: []const u8,
+    input: control.LedgerInput,
+    now: i64,
+) !void {
+    ledger_mutex.lockUncancelable(io);
+    defer ledger_mutex.unlock(io);
+    return control.appendLedger(allocator, io, campaign_dir, input, now);
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
     goal_data: []const u8,
     goal: *const Goal,
     campaign_dir: []const u8,
+) !Execution {
+    const action_id = try std.fmt.allocPrint(allocator, "ADAPT-{s}", .{goal.id});
+    defer allocator.free(action_id);
+    return runForTarget(allocator, io, goal_data, goal, campaign_dir, goal.target, action_id);
+}
+
+pub fn runForTarget(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    goal_data: []const u8,
+    goal: *const Goal,
+    campaign_dir: []const u8,
+    target: []const u8,
+    action_id: []const u8,
 ) !Execution {
     const scope_path = try std.fs.path.join(allocator, &.{ campaign_dir, "scope.json" });
     defer allocator.free(scope_path);
@@ -256,13 +284,11 @@ pub fn run(
     var state = try control.loadState(allocator, io, campaign_dir);
     defer state.deinit();
     const now = std.Io.Timestamp.now(io, .real).toSeconds();
-    const action_id = try std.fmt.allocPrint(allocator, "ADAPT-{s}", .{goal.id});
-    defer allocator.free(action_id);
     const params_hash = try goalHash(allocator, io, goal_data, goal);
     defer allocator.free(params_hash);
     try control.evaluate(allocator, io, campaign_dir, &scope, &state, .{
         .action_id = action_id,
-        .target = goal.target,
+        .target = target,
         .technique = .exploit,
         .params_hash = params_hash,
     }, now);
@@ -274,11 +300,11 @@ pub fn run(
     };
     defer approval.deinit();
     try control.consumeApproval(allocator, io, approval_file, now);
-    try control.appendLedger(allocator, io, campaign_dir, .{
+    try appendLedgerSerialized(allocator, io, campaign_dir, .{
         .event = "adaptive-start",
         .action_id = action_id,
         .approval_id = approval.id,
-        .target = goal.target,
+        .target = target,
         .technique = "exploit",
         .result = "started",
         .detail = goal.id,
@@ -289,7 +315,7 @@ pub fn run(
     var facts = std.StringHashMap([]const u8).init(allocator);
     defer facts.deinit();
     for (goal.facts) |fact| try facts.put(fact.name, fact.value);
-    try facts.put("target", goal.target);
+    try facts.put("target", target);
 
     var executed = std.StringHashMap(void).init(allocator);
     defer executed.deinit();
@@ -329,7 +355,7 @@ pub fn run(
             break;
         };
         defer spec.deinit();
-        spec.target = goal.target;
+        spec.target = target;
         var outcome = exploit.run(allocator, io, &spec, overrides.items) catch |err| {
             status = @errorName(err);
             break;
@@ -349,11 +375,11 @@ pub fn run(
                 }
             }
         }
-        try control.appendLedger(allocator, io, campaign_dir, .{
+        try appendLedgerSerialized(allocator, io, campaign_dir, .{
             .event = "adaptive-step",
             .action_id = action_id,
             .approval_id = approval.id,
-            .target = goal.target,
+            .target = target,
             .technique = "exploit",
             .result = if (outcome.oracle_pass) "succeeded" else "failed",
             .detail = module.id,
@@ -371,11 +397,11 @@ pub fn run(
             break;
         }
     }
-    try control.appendLedger(allocator, io, campaign_dir, .{
+    try appendLedgerSerialized(allocator, io, campaign_dir, .{
         .event = "adaptive-result",
         .action_id = action_id,
         .approval_id = approval.id,
-        .target = goal.target,
+        .target = target,
         .technique = "exploit",
         .result = status,
         .detail = goal.id,

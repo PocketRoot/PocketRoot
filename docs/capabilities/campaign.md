@@ -158,6 +158,13 @@ approval path for automatic multi-step exploitation.
 check STOP between modules and record the actual runtime path. The approval does not
 contain a step list; it authorises the module set, target and goal.
 
+### 5.5 Fleet approvals
+
+`fleet approve` mints one approval per target with action id
+`ADAPT-<goal-id>@<target-hash>`; the goal bytes and every module record digest are bound.
+`fleet run` executes targets in bounded batches, isolates failures and serializes shared
+ledger writes. See [fleet](../product/fleet.md).
+
 ## 6. Ledger
 
 `<dir>/ledger.jsonl` uses `pocketroot.ledger.v1`:
