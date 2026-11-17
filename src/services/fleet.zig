@@ -85,6 +85,7 @@ pub fn approve(
     defer allocator.free(goal_data);
     var goal = try adaptive.parseGoal(allocator, goal_data);
     defer goal.deinit();
+    try adaptive.resolve(&goal, io);
     const hash = try adaptive.goalHash(allocator, io, goal_data, &goal);
     defer allocator.free(hash);
     const id = try actionId(allocator, goal.id, target);
@@ -183,6 +184,7 @@ pub fn run(
     defer allocator.free(goal_data);
     var goal = try adaptive.parseGoal(allocator, goal_data);
     defer goal.deinit();
+    try adaptive.resolve(&goal, io);
 
     const concurrency = @min(
         concurrency_override orelse fleet.max_concurrency,

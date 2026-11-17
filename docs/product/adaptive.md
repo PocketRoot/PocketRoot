@@ -45,10 +45,34 @@ at runtime.
   be resolved from a fact or a default.
 - `inputs` bind record template parameters such as `{{file}}`.
 - `outputs` copy a capture from the record response into a fact. The next module can
-  require that fact, so the path depends on the previous output.
+  require that fact, so the path depends on the previous output. An output can name a
+  `transform`: `trim`, `lower`, `upper`, `url_decode`, `base64_decode`, `hex_decode`
+  or `identity`.
 - The runner picks the eligible module with the smallest `priority` (ties: declaration
   order), excludes already-executed modules unless `repeatable`, and stops on the first
   module whose effect output contains `goal.contains`.
+
+## 1.1 Automatic module synthesis
+
+A goal can omit `modules` and point at a record directory:
+
+```json
+{
+  "schema": "pocketroot.adaptive.v1",
+  "id": "ADAPT-AUTO",
+  "target": "127.0.0.1:8080",
+  "goal": { "contains": "uid=" },
+  "max_steps": 4,
+  "facts": [{ "name": "service", "value": "http" }],
+  "records": "samples/adaptive/records"
+}
+```
+
+When `modules` is empty, the runner walks `records` and synthesises modules. A record's
+optional `module` block supplies id/requires/inputs/outputs/priority. Without it, the
+synthesizer uses `match.service`/`match.product`/`match.version_prefix` as requires and
+step `capture` names as outputs. The approval hash is computed **after** synthesis, so it
+still binds every referenced record digest.
 
 ## 2. Approval and execution
 
@@ -110,8 +134,8 @@ evidence document; a reused approval is audited as `denied`.
 | No multi-target campaign | one goal targets one host |
 | No concurrency | modules run sequentially |
 | In-flight STOP | the HTTP read loop checks the STOP marker every ~100 ms and aborts with status `stopped`; a connect/write already in progress can still complete |
-| No automatic module synthesis | modules are authored records with declared facts |
-| No backtracking | once a module is executed it is excluded; there is no search over alternatives |
+| Synthesis is metadata-driven | records without a `module` block only get match-derived requires and capture-derived outputs |
+| No backtracking | once a module is executed it is excluded; there is no search over alternatives yet |
 | HTTP records only | transports remain the record's transport |
 | Goal is a substring check | no complex assertions or fact transformations |
 

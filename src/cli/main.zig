@@ -4610,6 +4610,10 @@ fn runCampaignApproveAdaptive(
         return error.CommandFailed;
     };
     defer goal.deinit();
+    PocketRoot.services.adaptive.resolve(&goal, io) catch |err| {
+        try writer.print("cannot resolve adaptive modules: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
     if (!std.mem.eql(u8, typed, goal.id)) {
         try writer.print("confirmation does not match {s}; nothing approved\n", .{goal.id});
         return error.InvalidArguments;
@@ -4703,6 +4707,10 @@ fn runAdaptiveCommand(
         return error.CommandFailed;
     };
     defer goal.deinit();
+    PocketRoot.services.adaptive.resolve(&goal, io) catch |err| {
+        try writer.print("cannot resolve adaptive modules: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
     var execution = PocketRoot.services.adaptive.run(allocator, io, data, &goal, dir) catch |err| {
         try writer.print("adaptive run refused: {s}\n", .{@errorName(err)});
         return error.CommandFailed;

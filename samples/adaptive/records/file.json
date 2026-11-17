@@ -12,5 +12,15 @@
       "expect_status": 200
     }
   ],
-  "expect_contains": ""
+  "expect_contains": "",
+  "module": {
+    "id": "file",
+    "priority": 10,
+    "requires": [
+      {
+        "fact": "route",
+        "equals": "file"
+      }
+    ]
+  }
 }

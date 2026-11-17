@@ -17,5 +17,29 @@
       }
     }
   ],
-  "expect_contains": ""
+  "expect_contains": "",
+  "module": {
+    "id": "discover",
+    "priority": 0,
+    "requires": [
+      {
+        "fact": "service",
+        "equals": "http"
+      }
+    ],
+    "inputs": [
+      {
+        "name": "file",
+        "fact": "target_file",
+        "default": "/etc/passwd"
+      }
+    ],
+    "outputs": [
+      {
+        "fact": "route",
+        "capture": "route",
+        "transform": "trim"
+      }
+    ]
+  }
 }

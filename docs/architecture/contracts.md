@@ -244,8 +244,9 @@ change invalidates it. STOP is checked before and after every step.
 
 The approval binds the goal bytes and the digest of every referenced record. The runner
 recomputes the hash before execution. A `requires` predicate compares one fact with an
-`equals` value; an `output` copies a record capture into a fact; an `input` binds a
-record template parameter from a fact or a default. This is the adaptive kernel payload:
+`equals` value; an `output` copies a record capture into a fact (with an optional `transform`); an
+`input` binds a record template parameter from a fact or a default. A goal with
+`records` and no `modules` is resolved by metadata-driven synthesis before hashing. This is the adaptive kernel payload:
 
 ```json
 {"kind":"exploit","mode":"adaptive","goal":"goal.json","campaign":".pocketroot"}

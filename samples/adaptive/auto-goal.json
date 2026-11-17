@@ -1,0 +1,16 @@
+{
+  "schema": "pocketroot.adaptive.v1",
+  "id": "ADAPT-AUTO",
+  "target": "127.0.0.1:8080",
+  "goal": {
+    "contains": "uid="
+  },
+  "max_steps": 4,
+  "facts": [
+    {
+      "name": "service",
+      "value": "http"
+    }
+  ],
+  "records": "samples/adaptive/records"
+}
