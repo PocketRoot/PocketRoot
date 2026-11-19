@@ -200,8 +200,9 @@ The DSL compiles a `net.http` call into a JSON payload carried by the network ca
 {"kind":"http","target":"127.0.0.1:8080","method":"GET","path":"/cgi-bin/.%2e/etc/passwd","body":"","headers":[],"timeout_ms":2000,"expect_status":200,"expect_body":"root:x:0:0","expect_absent":""}
 ```
 
-Exploit records carry a record-level `transport` (`http` default, `udp`, `tcp`); UDP/TCP
-steps use `data` and the response bytes are the datagram payload or TCP stream.
+Exploit records carry a record-level `transport` (`http` default, `udp`, `tcp`, `ajp`);
+UDP/TCP steps use `data`, AJP steps use `include_path`, and HTTP steps can use `body_file`
+to read the request body from a generated artifact.
 
 A `net.udp` call compiles to `{"kind":"udp","target":...,"data":...,"timeout_ms":...,"expect_min_bytes":...,"expect_body":...,"expect_absent":...}`.
 

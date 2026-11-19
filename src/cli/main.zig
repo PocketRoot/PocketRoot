@@ -76,6 +76,11 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "payload")) {
+        try runPayloadCommand(arena, init.io, stdout, args[2..]);
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "fleet")) {
         if (args.len < 3) {
             try stdout.print("usage: fleet approve|run ...\n", .{});
@@ -1029,6 +1034,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                       Verify the gate and consume the approval
         \\  reproduce <record.json> [--evidence <path>] [--json]
         \\  exploit run <record.json> --campaign <dir> [--param k=v] [--evidence <path>] [--json]
+        \\  payload pax-loop <out.tar>
+        \\                       Write the CVE-2019-20907 PAX-loop archive
         \\  chain plan --observations <file> [--records <dir>] [--target <t>] [--out <plan.json>]
         \\  chain approve <plan.json> --reason <text> --confirm <CHAIN-ID>
         \\  chain run <plan.json> --campaign <dir> [--evidence <path>]
@@ -1072,6 +1079,7 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --campaign .pocketroot --evidence repro.json
         \\  PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json --reason "ticket SEC-2" --confirm CVE-2018-7600
         \\  PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json --campaign .pocketroot --param command=id --evidence exploit.json
+        \\  PocketRoot payload pax-loop samples/payloads/CVE-2019-20907.tar
         \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
         \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
@@ -3927,6 +3935,22 @@ const ExploitStopContext = struct {
 fn exploitStopCheck(context: *anyopaque) bool {
     const stop: *ExploitStopContext = @ptrCast(@alignCast(context));
     return PocketRoot.services.control.isStopped(stop.allocator, stop.io, stop.dir);
+}
+
+fn runPayloadCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    if (raw.len != 2 or !std.mem.eql(u8, raw[0], "pax-loop")) {
+        try writer.print("usage: payload pax-loop <out.tar>\n", .{});
+        return error.InvalidArguments;
+    }
+    const archive = try PocketRoot.services.pax.loopTar(allocator);
+    defer allocator.free(archive);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = raw[1], .data = archive });
+    try writer.print("wrote {s}: {d} bytes (CVE-2019-20907 PAX loop)\n", .{ raw[1], archive.len });
 }
 
 fn runExploitCommand(

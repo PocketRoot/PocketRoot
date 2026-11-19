@@ -58,6 +58,8 @@ pub const services = struct {
     pub const tls_inspect = @import("services/tls_inspect.zig");
     pub const tcp_scan = @import("services/tcp_scan.zig");
     pub const tcp_probe = @import("services/tcp_probe.zig");
+    pub const ajp_probe = @import("services/ajp_probe.zig");
+    pub const pax = @import("services/pax.zig");
     pub const workflow = @import("services/workflow.zig");
     pub const script = @import("services/script.zig");
     pub const script_builder = @import("services/script_builder.zig");
@@ -205,6 +207,8 @@ test {
         services.fleet,
         services.stop,
         services.tcp_probe,
+        services.ajp_probe,
+        services.pax,
         services.tls_inspect,
         services.tcp_scan,
         services.workflow,
