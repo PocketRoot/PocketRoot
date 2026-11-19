@@ -61,9 +61,9 @@ about 700 ms while each target needed two 300 ms requests, showing the batch ove
 |---|---|
 | No per-target result merge | each target has its own evidence and facts |
 | No retry | a failed target stays failed until rerun with a new approval |
-| In-flight STOP | each target's adaptive HTTP reads check STOP every ~100 ms; batch scheduling still starts only before a stop is seen |
+| In-flight STOP | each target's HTTP/UDP/TCP reads check STOP every ~100 ms; batch scheduling still starts only before a stop is seen |
 | Synthesis is metadata-driven | a goal can use `records`; modules come from record metadata or match/capture inference |
 | Backtracking replays requests | per-target DFS restores runner state, not target-side effects |
-| HTTP + UDP records only | other transports need new primitives |
+| HTTP + UDP + TCP records only | other transports need new primitives |
 
 These are deliberate gaps; the next work is in-flight cancellation and module synthesis.

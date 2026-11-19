@@ -203,10 +203,9 @@ fn buildRequest(allocator: std.mem.Allocator, spec: *const Spec, target: Target)
     return output.toOwnedSlice();
 }
 
-pub const StopCheck = struct {
-    context: *anyopaque,
-    isStopped: *const fn (*anyopaque) bool,
-};
+const stop_mod = @import("stop.zig");
+
+pub const StopCheck = stop_mod.Check;
 
 pub fn probe(allocator: std.mem.Allocator, io: std.Io, spec: *const Spec) !Response {
     return probeWithStop(allocator, io, spec, null);

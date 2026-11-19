@@ -3,6 +3,7 @@
 const std = @import("std");
 const capability = @import("../core/capability.zig");
 const tcp_scan = @import("tcp_scan.zig");
+const stop = @import("stop.zig");
 
 pub const max_datagram_bytes = 64 * 1024;
 
@@ -110,14 +111,16 @@ pub fn exchange(
     target_text: []const u8,
     data: []const u8,
     timeout_ms: u32,
+    stop_check: ?stop.Check,
 ) ![]u8 {
     if (data.len == 0 or data.len > 4096) return error.InvalidDatagram;
     if (timeout_ms < 50 or timeout_ms > 5000) return error.InvalidTimeout;
     const target = try parseTarget(target_text);
-    const timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = std.Io.Duration.fromMilliseconds(timeout_ms),
         .clock = .awake,
-    }) };
+    });
+    const timeout: std.Io.Timeout = .{ .deadline = deadline };
     var address = try tcp_scan.resolveWithTimeout(io, target.host, target.port, timeout);
     address.setPort(target.port);
     const local = std.Io.net.IpAddress{ .ip4 = std.Io.net.Ip4Address.unspecified(0) };
@@ -125,8 +128,27 @@ pub fn exchange(
     defer socket.close(io);
     try socket.send(io, &address, data);
     var buffer: [max_datagram_bytes]u8 = undefined;
-    const message = try receiveDatagram(&socket, io, &buffer, timeout);
-    return allocator.dupe(u8, message.data);
+    while (true) {
+        if (stop_check) |check| {
+            if (check.isStopped(check.context)) return error.Stopped;
+        }
+        const now = std.Io.Clock.Timestamp.now(io, .awake);
+        if (now.raw.nanoseconds >= deadline.raw.nanoseconds) return error.Timeout;
+        const slice_timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = std.Io.Duration.fromMilliseconds(100),
+            .clock = .awake,
+        }) };
+        const message = receiveDatagram(&socket, io, &buffer, slice_timeout) catch |err| switch (err) {
+            error.Timeout => {
+                if (stop_check) |check| {
+                    if (check.isStopped(check.context)) return error.Stopped;
+                }
+                continue;
+            },
+            else => return err,
+        };
+        return allocator.dupe(u8, message.data);
+    }
 }
 
 pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !capability.Result {

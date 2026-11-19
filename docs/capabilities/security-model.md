@@ -130,4 +130,4 @@ execution is not. See [campaign](campaign.md) for the command flow and limits.
 | Campaign stop is software-only | No hardware inhibit line or watchdog exists; a real device must add both |
 | Network probes bypass the campaign gate | `tcp-scan`, `http-inspect`, `tls-inspect`, `net.http`/`net.udp` scripts and validation `reproduce` records predate the control plane and do not require an approval |
 | Exploit effects are not sandboxed | `exploit run` sends the approved requests only; the effect on the target (command execution, file read) is limited by the target, not by the engine |
-| STOP is cooperative | HTTP reads check the marker every ~100 ms; a connect or write already in progress can still complete, and non-HTTP transports do not yet check it |
+| STOP is cooperative | HTTP, UDP and TCP reads check the marker every ~100 ms; a connect or write already in progress can still complete |

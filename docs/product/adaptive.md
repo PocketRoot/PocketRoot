@@ -145,10 +145,10 @@ evidence document; a reused approval is audited as `denied`.
 |---|---|
 | No multi-target campaign | one goal targets one host |
 | No concurrency | modules run sequentially |
-| In-flight STOP | the HTTP read loop checks the STOP marker every ~100 ms and aborts with status `stopped`; a connect/write already in progress can still complete |
+| In-flight STOP | HTTP, UDP and TCP read loops check the STOP marker every ~100 ms and abort with status `stopped`; a connect/write already in progress can still complete |
 | Synthesis is metadata-driven | records without a `module` block only get match-derived requires and capture-derived outputs |
 | Backtracking replays requests | rollback restores facts/selection, not target-side effects |
-| HTTP + UDP records only | other transports need new primitives |
+| HTTP + UDP + TCP records only | other transports need new primitives |
 | Goal is a substring check | no complex assertions or fact transformations |
 
 These are explicit deferrals, not claims.
