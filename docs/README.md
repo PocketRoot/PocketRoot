@@ -9,6 +9,7 @@ what the software does and how to verify it. Every behavioural claim is anchored
 | Document | Contents |
 |---|---|
 | [architecture/overview](architecture/overview.md) | Layers, data flow, main execution paths, extension points |
+| [architecture/exploit-admission](architecture/exploit-admission.md) | Normative rule: core generic; admitted exploits are PocketRoot DSL scripts |
 | [architecture/contracts](architecture/contracts.md) | Plugin contract, result model, limits, IPC frame format |
 | [architecture/repository-map](architecture/repository-map.md) | Repository layout, cross-repository coupling, read-only references |
 | [capabilities/facts](capabilities/facts.md) | Generated counts: plugins, kinds, operations, tests, smoke checks, catalogue size |
