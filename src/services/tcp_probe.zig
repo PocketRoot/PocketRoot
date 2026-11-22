@@ -134,3 +134,49 @@ pub fn executeWithStop(
     try output.writer.writeByte('\n');
     return capability.Result.init(allocator, .succeeded, output.written());
 }
+
+const StopAfter = struct {
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+};
+
+fn stopAfter(ctx: *anyopaque) bool {
+    const state: *StopAfter = @ptrCast(@alignCast(ctx));
+    return std.Io.Clock.Timestamp.now(state.io, .awake).raw.nanoseconds >= state.deadline.raw.nanoseconds;
+}
+
+fn serveStall(server: *std.Io.net.Server, io: std.Io) std.Io.Cancelable!void {
+    const stream = server.accept(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+    defer stream.close(io);
+    std.Io.Timeout.sleep(.{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(5000),
+        .clock = .awake,
+    } }, io) catch return;
+}
+
+test "tcp probe aborts while waiting for a response" {
+    var listen_address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try listen_address.listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+    var group: std.Io.Group = .init;
+    defer group.cancel(std.testing.io);
+    try group.concurrent(std.testing.io, serveStall, .{ &server, std.testing.io });
+
+    const spec = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{"kind":"tcp","target":"127.0.0.1:{d}","data":"PING"}}
+    , .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(spec);
+    var state = StopAfter{ .io = std.testing.io, .deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .raw = std.Io.Duration.fromMilliseconds(100),
+        .clock = .awake,
+    }) };
+    var result = try executeWithStop(std.testing.allocator, std.testing.io, spec, .{
+        .context = &state,
+        .isStopped = stopAfter,
+    });
+    defer result.deinit();
+    try std.testing.expectEqual(capability.Status.cancelled, result.status);
+}

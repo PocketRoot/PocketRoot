@@ -302,3 +302,50 @@ test "udp spec rejects an empty datagram" {
         \\{"kind":"udp","target":"127.0.0.1:53"}
     ));
 }
+
+const StopAfter = struct {
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+};
+
+fn stopAfter(ctx: *anyopaque) bool {
+    const state: *StopAfter = @ptrCast(@alignCast(ctx));
+    const now = std.Io.Clock.Timestamp.now(state.io, .awake);
+    return now.raw.nanoseconds >= state.deadline.raw.nanoseconds;
+}
+
+fn serveDrop(socket: *std.Io.net.Socket, io: std.Io) std.Io.Cancelable!void {
+    var buffer: [512]u8 = undefined;
+    _ = receiveDatagram(socket, io, &buffer, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(1000),
+        .clock = .awake,
+    } }) catch return;
+    std.Io.Timeout.sleep(.{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(5000),
+        .clock = .awake,
+    } }, io) catch return;
+}
+
+test "udp probe aborts while waiting for a response" {
+    const local = std.Io.net.IpAddress{ .ip4 = std.Io.net.Ip4Address.unspecified(0) };
+    var socket = try local.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(std.testing.io);
+    var group: std.Io.Group = .init;
+    defer group.cancel(std.testing.io);
+    try group.concurrent(std.testing.io, serveDrop, .{ &socket, std.testing.io });
+
+    const spec = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{"kind":"udp","target":"127.0.0.1:{d}","data":"abc"}}
+    , .{socket.address.getPort()});
+    defer std.testing.allocator.free(spec);
+    var state = StopAfter{ .io = std.testing.io, .deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{
+        .raw = std.Io.Duration.fromMilliseconds(100),
+        .clock = .awake,
+    }) };
+    var result = try executeWithStop(std.testing.allocator, std.testing.io, spec, .{
+        .context = &state,
+        .isStopped = stopAfter,
+    });
+    defer result.deinit();
+    try std.testing.expectEqual(capability.Status.cancelled, result.status);
+}
