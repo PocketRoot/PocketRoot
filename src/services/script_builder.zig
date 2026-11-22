@@ -57,6 +57,8 @@ pub const verb_map = [_]VerbMapping{
     .{ .verb = "net.scan", .kind = .network, .operation = .analyze },
     .{ .verb = "net.http", .kind = .network, .operation = .analyze },
     .{ .verb = "net.udp", .kind = .network, .operation = .analyze },
+    .{ .verb = "net.tcp", .kind = .network, .operation = .analyze },
+    .{ .verb = "net.ajp", .kind = .network, .operation = .analyze },
     .{ .verb = "exploit.plan", .kind = .exploit, .operation = .analyze },
     .{ .verb = "exploit.execute", .kind = .exploit, .operation = .manage },
     .{ .verb = "exploit.adaptive", .kind = .exploit, .operation = .manage },
@@ -153,15 +155,21 @@ const Compiler = struct {
         }
         const is_http = std.mem.eql(u8, cap.verb, "net.http");
         const is_udp = std.mem.eql(u8, cap.verb, "net.udp");
+        const is_tcp = std.mem.eql(u8, cap.verb, "net.tcp");
+        const is_ajp = std.mem.eql(u8, cap.verb, "net.ajp");
         const is_exploit_plan = std.mem.eql(u8, cap.verb, "exploit.plan");
         const is_exploit_execute = std.mem.eql(u8, cap.verb, "exploit.execute");
         const is_exploit_adaptive = std.mem.eql(u8, cap.verb, "exploit.adaptive");
         const http_compiled = if (is_http)
             try httpSpec(self.a, call.options)
         else
-            HttpCompiled{ .payload = "", .path_ref = null };
+            HttpCompiled{ .payload = "", .path_ref = null, .body_ref = null };
         const http_payload = if (is_udp)
             try udpSpec(self.a, call.options)
+        else if (is_tcp)
+            try tcpSpec(self.a, call.options)
+        else if (is_ajp)
+            try ajpSpec(self.a, call.options)
         else if (is_exploit_plan)
             try exploitPlanSpec(self.a, call.options)
         else if (is_exploit_execute)
@@ -178,9 +186,10 @@ const Compiler = struct {
                 .kind = mapping.kind,
                 .operation = mapping.operation,
                 .region = try regionOption(cap, options.policy_region),
-                .payload = if (is_http or is_udp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) http_payload else payload_literal orelse "",
-                .payload_ref = if (is_http or is_udp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) null else payload_ref,
+                .payload = if (is_http or is_udp or is_tcp or is_ajp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) http_payload else payload_literal orelse "",
+                .payload_ref = if (is_http or is_udp or is_tcp or is_ajp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) null else payload_ref,
                 .path_ref = http_compiled.path_ref,
+                .body_ref = http_compiled.body_ref,
                 .active_authorized = options.authorize_active,
                 .bind = bind,
             },
@@ -409,7 +418,19 @@ fn allConnectors(connectors: []const script.Connector, expected: script.Connecto
 }
 
 const EmitSpec = struct { emit: automation.Emit, payload: []const u8 };
-const HttpCompiled = struct { payload: []const u8, path_ref: ?[]const u8 };
+const HttpCompiled = struct { payload: []const u8, path_ref: ?[]const u8, body_ref: ?[]const u8 };
+
+fn decodeHex(a: Allocator, text: []const u8) Error![]const u8 {
+    if (text.len % 2 != 0) return error.InvalidOptionValue;
+    const output = a.alloc(u8, text.len / 2) catch return error.OutOfMemory;
+    var i: usize = 0;
+    while (i < output.len) : (i += 1) {
+        const high = std.fmt.charToDigit(text[i * 2], 16) catch return error.InvalidOptionValue;
+        const low = std.fmt.charToDigit(text[i * 2 + 1], 16) catch return error.InvalidOptionValue;
+        output[i] = high << 4 | low;
+    }
+    return output;
+}
 
 /// The DSL's net.http call is compiled into a JSON request spec; the live backend
 /// parses it and runs services/http_probe. Keeping the spec in the payload means the
@@ -429,7 +450,17 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
             else => return error.InvalidOptionValue,
         }
     }
-    const body = (try literalString(options, "body")) orelse "";
+    if (referenceOption(options, "path_suffix")) |suffix| {
+        if (path_ref != null) return error.InvalidOptionValue;
+        path = try std.mem.concat(a, u8, &.{ path, "__POCKETROOT_PATH_REF__" });
+        path_ref = suffix;
+    }
+    var body = (try literalString(options, "body")) orelse "";
+    var body_ref: ?[]const u8 = null;
+    if (referenceOption(options, "body_ref")) |reference| {
+        body = try std.mem.concat(a, u8, &.{ body, "__POCKETROOT_BODY_REF__" });
+        body_ref = reference;
+    }
 
     var timeout_ms: u32 = 2000;
     if (numberOption(options, "timeout")) |value| {
@@ -448,8 +479,14 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
     }
 
     const capture_name = try literalString(options, "capture_name");
-    const capture_prefix = try literalString(options, "capture_prefix");
-    const capture_suffix = try literalString(options, "capture_suffix");
+    var capture_prefix = try literalString(options, "capture_prefix");
+    var capture_suffix = try literalString(options, "capture_suffix");
+    if (try literalString(options, "capture_prefix_hex")) |hex| {
+        capture_prefix = try decodeHex(a, hex);
+    }
+    if (try literalString(options, "capture_suffix_hex")) |hex| {
+        capture_suffix = try decodeHex(a, hex);
+    }
     const CaptureWire = struct { name: []const u8, prefix: []const u8, suffix: []const u8 };
     var capture: ?CaptureWire = null;
     if (capture_name != null or capture_prefix != null or capture_suffix != null) {
@@ -482,6 +519,7 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
         method: []const u8,
         path: []const u8,
         body: []const u8,
+        body_file: []const u8,
         headers: []const HeaderWire,
         capture: ?CaptureWire,
         timeout_ms: u32,
@@ -501,6 +539,7 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
         .method = method,
         .path = path,
         .body = body,
+        .body_file = (try literalString(options, "body_file")) orelse "",
         .headers = header_list.items,
         .capture = capture,
         .timeout_ms = timeout_ms,
@@ -511,7 +550,95 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
     return .{
         .payload = try output.toOwnedSlice(),
         .path_ref = path_ref,
+        .body_ref = body_ref,
     };
+}
+
+fn tcpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const target = (try literalString(options, "target")) orelse return error.InvalidOptionValue;
+    const data = (try literalString(options, "data")) orelse return error.InvalidOptionValue;
+    var timeout_ms: u32 = 2000;
+    if (numberOption(options, "timeout")) |value| {
+        timeout_ms = value;
+    } else if (try literalString(options, "timeout")) |text| {
+        timeout_ms = parseHttpDuration(text) orelse return error.InvalidOptionValue;
+    }
+    if (timeout_ms < 50 or timeout_ms > 5000) return error.InvalidOptionValue;
+    const Wire = struct {
+        kind: []const u8,
+        target: []const u8,
+        data: []const u8,
+        timeout_ms: u32,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{ .kind = "tcp", .target = target, .data = data, .timeout_ms = timeout_ms }) catch return error.OutOfMemory;
+    return output.toOwnedSlice();
+}
+
+fn ajpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const target = (try literalString(options, "target")) orelse return error.InvalidOptionValue;
+    const method = (try literalString(options, "method")) orelse "GET";
+    const uri = (try literalString(options, "uri")) orelse "/";
+    var server_port: u16 = 8080;
+    if (numberOption(options, "server_port")) |value| {
+        if (value == 0 or value > 65535) return error.InvalidOptionValue;
+        server_port = @intCast(value);
+    } else if (try literalString(options, "server_port")) |text| {
+        server_port = std.fmt.parseInt(u16, text, 10) catch return error.InvalidOptionValue;
+    }
+    var timeout_ms: u32 = 2000;
+    if (numberOption(options, "timeout")) |value| {
+        timeout_ms = value;
+    } else if (try literalString(options, "timeout")) |text| {
+        timeout_ms = parseHttpDuration(text) orelse return error.InvalidOptionValue;
+    }
+    if (timeout_ms < 50 or timeout_ms > 10000) return error.InvalidOptionValue;
+
+    const AttributeWire = struct { name: []const u8, value: []const u8 };
+    var attribute_list: std.ArrayList(AttributeWire) = .empty;
+    defer attribute_list.deinit(a);
+    if (try literalString(options, "attributes")) |text| {
+        var pieces = std.mem.splitScalar(u8, text, ';');
+        while (pieces.next()) |raw| {
+            const piece = std.mem.trim(u8, raw, " \t");
+            if (piece.len == 0) continue;
+            const equals = std.mem.indexOfScalar(u8, piece, '=') orelse return error.InvalidOptionValue;
+            const name = std.mem.trim(u8, piece[0..equals], " \t");
+            const value = std.mem.trim(u8, piece[equals + 1 ..], " \t");
+            if (name.len == 0) return error.InvalidOptionValue;
+            try attribute_list.append(a, .{ .name = name, .value = value });
+        }
+    }
+    const Wire = struct {
+        kind: []const u8,
+        target: []const u8,
+        method: []const u8,
+        uri: []const u8,
+        server_port: u16,
+        attributes: []const AttributeWire,
+        timeout_ms: u32,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{
+        .kind = "ajp",
+        .target = target,
+        .method = method,
+        .uri = uri,
+        .server_port = server_port,
+        .attributes = attribute_list.items,
+        .timeout_ms = timeout_ms,
+    }) catch return error.OutOfMemory;
+    return output.toOwnedSlice();
 }
 
 fn udpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
@@ -1477,4 +1604,60 @@ test "exploit.adaptive compiles into an active adaptive spec" {
     try std.testing.expectEqual(capability.Kind.exploit, compiled.actions[0].kind);
     try std.testing.expectEqual(capability.Operation.manage, compiled.actions[0].operation);
     try std.testing.expect(std.mem.indexOf(u8, compiled.actions[0].payload, "\"mode\":\"adaptive\"") != null);
+}
+
+test "net.tcp compiles to a tcp spec" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "tcp" do
+        \\    use "pack.net"
+        \\    cap exchange = net.tcp
+        \\    step "s" do
+        \\        r = exchange { target = "127.0.0.1:9000", data = "PING" }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    const payload = compiled.actions[0].payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"tcp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "PING") != null);
+}
+
+test "net.ajp compiles method, uri and attributes" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "ajp" do
+        \\    use "pack.net"
+        \\    cap read = net.ajp
+        \\    step "s" do
+        \\        r = read { target = "127.0.0.1:8009", method = "GET", uri = "/", attributes = "a=b;c=d" }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    const payload = compiled.actions[0].payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"ajp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "javax") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"a\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"value\":\"b\"") != null);
+}
+
+test "net.http compiles body_file" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "http-body" do
+        \\    use "pack.net"
+        \\    cap req = net.http
+        \\    step "s" do
+        \\        r = req { target = "127.0.0.1:8080", path = "/x", body_file = "samples/payloads/CVE-2019-20907.tar" }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    const payload = compiled.actions[0].payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"body_file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "CVE-2019-20907.tar") != null);
 }

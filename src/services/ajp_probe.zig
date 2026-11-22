@@ -8,6 +8,7 @@
 const std = @import("std");
 const tcp_scan = @import("tcp_scan.zig");
 const stop = @import("stop.zig");
+const capability = @import("../core/capability.zig");
 
 pub const max_response_bytes = 4 * 1024 * 1024;
 const max_frame_bytes = 64 * 1024;
@@ -213,4 +214,76 @@ test "AJP request encodes arbitrary attributes" {
     try std.testing.expect(std.mem.indexOf(u8, packet, "/WEB-INF/web.xml") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet, "custom.one") != null);
     try std.testing.expectEqual(@as(u8, 0xFF), packet[packet.len - 1]);
+}
+
+const AttributeWire = struct {
+    name: []const u8 = "",
+    value: []const u8 = "",
+};
+
+const SpecWire = struct {
+    kind: []const u8 = "ajp",
+    target: []const u8 = "",
+    method: []const u8 = "GET",
+    uri: []const u8 = "/",
+    server_port: u16 = 8080,
+    attributes: []const AttributeWire = &.{},
+    timeout_ms: u32 = 2000,
+};
+
+pub fn isAjpSpec(payload: []const u8) bool {
+    return std.mem.indexOf(u8, payload, "\"kind\":\"ajp\"") != null;
+}
+
+fn appendEscaped(writer: *std.Io.Writer, data: []const u8) !void {
+    const limit = @min(data.len, 256);
+    for (data[0..limit]) |byte| {
+        switch (byte) {
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x20...0x7e => try writer.writeByte(byte),
+            else => try writer.writeByte('?'),
+        }
+    }
+}
+
+pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !capability.Result {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const owned = a.dupe(u8, payload) catch return error.OutOfMemory;
+    const wire = std.json.parseFromSliceLeaky(SpecWire, a, owned, .{
+        .ignore_unknown_fields = true,
+    }) catch return capability.Result.init(allocator, .failed, "InvalidAjpSpec");
+    if (!std.mem.eql(u8, wire.kind, "ajp") or wire.target.len == 0 or wire.uri.len == 0) {
+        return capability.Result.init(allocator, .failed, "InvalidAjpSpec");
+    }
+    if (wire.attributes.len > 64 or wire.timeout_ms < 50 or wire.timeout_ms > 10000) {
+        return capability.Result.init(allocator, .failed, "InvalidAjpSpec");
+    }
+    const attributes = a.alloc(Attribute, wire.attributes.len) catch return error.OutOfMemory;
+    for (wire.attributes, 0..) |attribute, i| {
+        if (attribute.name.len == 0 or attribute.name.len > 4096 or attribute.value.len > 4096) {
+            return capability.Result.init(allocator, .failed, "InvalidAjpSpec");
+        }
+        attributes[i] = .{ .name = attribute.name, .value = attribute.value };
+    }
+    const response = exchange(allocator, io, wire.target, .{
+        .method = wire.method,
+        .uri = wire.uri,
+        .server_port = wire.server_port,
+        .attributes = attributes,
+    }, wire.timeout_ms, null) catch |err| {
+        return capability.Result.init(allocator, .failed, @errorName(err));
+    };
+    defer allocator.free(response.body);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    try output.writer.print("status={d}\n", .{response.status});
+    try output.writer.print("bytes={d}\n", .{response.body.len});
+    try output.writer.writeAll("body_prefix=");
+    try appendEscaped(&output.writer, response.body);
+    try output.writer.writeByte('\n');
+    return capability.Result.init(allocator, .succeeded, output.written());
 }

@@ -45,6 +45,8 @@ pub const ActionSpec = struct {
     payload_ref: ?[]const u8 = null,
     /// Variable path substituted for the HTTP request path placeholder at run time.
     path_ref: ?[]const u8 = null,
+    /// Variable path substituted for the HTTP request body placeholder at run time.
+    body_ref: ?[]const u8 = null,
     active_authorized: bool = false,
     /// A deliberate script failure: append an error finding, fail the step and stop the run.
     fail: ?[]const u8 = null,
@@ -207,6 +209,13 @@ pub const Engine = struct {
             const value = try self.requireVariable(path);
             replaced = try std.mem.replaceOwned(u8, self.capabilities.allocator, payload, "__POCKETROOT_PATH_REF__", value);
             payload = replaced.?;
+        }
+        if (spec.body_ref) |path| {
+            const value = try self.requireVariable(path);
+            const next = try std.mem.replaceOwned(u8, self.capabilities.allocator, payload, "__POCKETROOT_BODY_REF__", value);
+            if (replaced) |old| self.capabilities.allocator.free(old);
+            replaced = next;
+            payload = next;
         }
         var result = self.capabilities.execute(.{
             .id = request_id,

@@ -55,6 +55,7 @@ pub const services = struct {
     pub const adaptive = @import("services/adaptive.zig");
     pub const fleet = @import("services/fleet.zig");
     pub const stop = @import("services/stop.zig");
+    pub const admission = @import("services/admission.zig");
     pub const tls_inspect = @import("services/tls_inspect.zig");
     pub const tcp_scan = @import("services/tcp_scan.zig");
     pub const tcp_probe = @import("services/tcp_probe.zig");
@@ -205,6 +206,7 @@ test {
         services.adaptive,
         services.fleet,
         services.stop,
+        services.admission,
         services.tcp_probe,
         services.ajp_probe,
         services.tls_inspect,

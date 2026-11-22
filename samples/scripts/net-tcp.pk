@@ -1,0 +1,9 @@
+-- Generic raw TCP transport example.
+script "net-tcp" do
+    use "pack.net"
+    cap exchange = net.tcp
+    step "exchange" do
+        response = exchange { target = "127.0.0.1:9099", data = "PING" }
+        emit finding { severity = "info", message = response.body_prefix }
+    end
+end

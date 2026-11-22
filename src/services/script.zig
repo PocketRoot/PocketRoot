@@ -274,6 +274,8 @@ const verbs = [_]VerbInfo{
     .{ .name = "net.scan", .active = false },
     .{ .name = "net.http", .active = false },
     .{ .name = "net.udp", .active = false },
+    .{ .name = "net.tcp", .active = false },
+    .{ .name = "net.ajp", .active = false },
     .{ .name = "exploit.plan", .active = false },
     .{ .name = "exploit.execute", .active = true },
     .{ .name = "exploit.adaptive", .active = true },
@@ -282,12 +284,14 @@ const verbs = [_]VerbInfo{
 };
 
 const option_keys = [_][]const u8{
-    "region",       "on_error",       "into",           "payload",      "confirm",
-    "tag",          "note",           "path",           "timeout",      "message",
-    "severity",     "target",         "method",         "body",         "expect_status",
-    "expect_body",  "expect_absent",  "headers",        "data",         "expect_min_bytes",
-    "capture_name", "capture_prefix", "capture_suffix", "observations", "surface",
-    "records",      "plan",           "campaign",       "goal",
+    "region",             "on_error",           "into",           "payload",      "confirm",
+    "tag",                "note",               "path",           "timeout",      "message",
+    "severity",           "target",             "method",         "body",         "expect_status",
+    "expect_body",        "expect_absent",      "headers",        "data",         "expect_min_bytes",
+    "capture_name",       "capture_prefix",     "capture_suffix", "observations", "surface",
+    "records",            "plan",               "campaign",       "goal",         "body_file",
+    "uri",                "server_port",        "attributes",     "path_suffix",  "body_ref",
+    "capture_prefix_hex", "capture_suffix_hex",
 };
 
 fn verbInfo(name: []const u8) ?VerbInfo {
@@ -304,7 +308,7 @@ const packs = [_]PackEntry{
     .{ .name = "pack.rf", .verbs = &.{ "subghz.read", "subghz.transmit", "lfrfid.read", "ibutton.read" } },
     .{ .name = "pack.nfc", .verbs = &.{ "nfc.read", "nfc.emulate" } },
     .{ .name = "pack.ir", .verbs = &.{ "ir.receive", "ir.transmit" } },
-    .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan", "net.http", "net.udp" } },
+    .{ .name = "pack.net", .verbs = &.{ "net.capture", "net.tls", "net.scan", "net.http", "net.udp", "net.tcp", "net.ajp" } },
     .{ .name = "pack.fs", .verbs = &.{ "fs.read", "fs.write" } },
     .{ .name = "pack.exploit", .verbs = &.{ "exploit.plan", "exploit.execute", "exploit.adaptive" } },
 };

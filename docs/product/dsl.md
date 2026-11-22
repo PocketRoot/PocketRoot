@@ -77,7 +77,7 @@ Every verb becomes a `capability.Request` (see
 
 | DSL verb | Kind and operation | Active authorisation |
 |---|---|---|
-| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
+| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `net.tcp`, `net.ajp`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
 | `subghz.transmit` | `subghz` + `transmit` | yes, with matching region |
 | `ir.transmit` | `infrared` + `transmit` | yes |
 | `nfc.emulate` | `nfc` + `emulate` | yes |
@@ -94,7 +94,7 @@ one pack:
 | `pack.rf` | `subghz.read`, `subghz.transmit`, `lfrfid.read`, `ibutton.read` |
 | `pack.nfc` | `nfc.read`, `nfc.emulate` |
 | `pack.ir` | `ir.receive`, `ir.transmit` |
-| `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp` |
+| `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `net.tcp`, `net.ajp` |
 | `pack.exploit` | `exploit.plan`, `exploit.execute`, `exploit.adaptive` |
 | `pack.fs` | `fs.read`, `fs.write` |
 
@@ -107,8 +107,10 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 |---|---|
 | `on_error` | `"abort"`, `"continue"` or `"retry(n)"`; retry reuses the workflow attempt counter |
 | `fail "message"` | a deliberate failure: emits an `error` finding, fails the step and stops the run |
-| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `headers`, `body`, `timeout`, `capture_name`, `capture_prefix`, `capture_suffix`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `captured`, `capture_found`, `oracle`, `oracle_reason` |
+| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `path_suffix`, `headers`, `body`, `body_file`, `body_ref`, `timeout`, `capture_name`, `capture_prefix`, `capture_suffix`, `capture_prefix_hex`, `capture_suffix_hex`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `captured`, `capture_found`, `oracle`, `oracle_reason` |
 | `net.udp` | one datagram: `target`, `data`, `timeout`, `expect_min_bytes`, `expect_body`, `expect_absent`; the result binds `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason` |
+| `net.tcp` | one raw TCP payload: `target`, `data`, `timeout`; the result binds `bytes`, `body_prefix` |
+| `net.ajp` | one AJP13 request: `target`, `method`, `uri`, `server_port`, `attributes` (`name=value;name=value`), `timeout`; the result binds `status`, `bytes`, `body_prefix` |
 | `exploit.plan` | passive chain analysis: `observations` or `surface`, `records`, `target`; the result binds the `pocketroot.chain.v1` JSON |
 | `exploit.execute` | active, campaign-gated chain execution: `plan`, `campaign`; the result binds `pocketroot.chain.evidence.v1` |
 | `exploit.adaptive` | active, campaign-gated output-driven goal: `goal`, `campaign`; the result binds `pocketroot.adaptive.evidence.v1` |
@@ -260,6 +262,28 @@ Live mode uses the TCP scanner, so protocol probes only run for the ports it kno
 (80, 443, 6379, 8080, 3306, 5432 and the other documented defaults). A host mapped to an
 unusual port connects successfully but reports no product or version. `--dump-vars`
 prints every bound variable and is intended for diagnostics, not for evidence.
+
+## 10.5 TCP, AJP and body references
+
+`net.tcp` sends one payload and reads until EOF/timeout. `net.ajp` builds a generic AJP13
+request from `method`, `uri`, `server_port` and semicolon-separated `attributes`:
+
+```lua
+script "ajp-read" do
+    use "pack.net"
+    cap read = net.ajp
+    step "read" do
+        r = read { target = "127.0.0.1:8009",
+                   attributes = "javax.servlet.include.path_info=/WEB-INF/web.xml" }
+        emit finding { severity = "info", message = r.status }
+    end
+end
+```
+
+`net.http` accepts `body_file` for a request body loaded from a local file, `path_suffix`
+to append a captured value to a path, `body_ref`/`body_prefix` to compose a body, and
+`capture_prefix_hex`/`capture_suffix_hex` when a delimiter contains quotes or binary bytes.
+The CVE-2018-7600 and CVE-2026-58415 scripts use these generic options.
 
 ## 11. Raw HTTP reproduction scripts
 

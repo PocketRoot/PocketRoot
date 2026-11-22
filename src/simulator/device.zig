@@ -4,6 +4,8 @@ const fixtures = @import("fixtures.zig");
 const tcp_scan = @import("../services/tcp_scan.zig");
 const http_probe = @import("../services/http_probe.zig");
 const udp_probe = @import("../services/udp_probe.zig");
+const tcp_probe = @import("../services/tcp_probe.zig");
+const ajp_probe = @import("../services/ajp_probe.zig");
 const exploit_plan = @import("../services/exploit_plan.zig");
 const exploit_execute = @import("../services/exploit_execute.zig");
 
@@ -52,6 +54,12 @@ pub const Backend = struct {
                 }
                 if (udp_probe.isUdpSpec(request.payload)) {
                     return udp_probe.execute(allocator, io, request.payload);
+                }
+                if (tcp_probe.isTcpSpec(request.payload)) {
+                    return tcp_probe.execute(allocator, io, request.payload);
+                }
+                if (ajp_probe.isAjpSpec(request.payload)) {
+                    return ajp_probe.execute(allocator, io, request.payload);
                 }
                 const text = try liveScan(allocator, io, request.payload);
                 defer allocator.free(text);

@@ -25,6 +25,7 @@ pub const Spec = struct {
     method: Method,
     path: []const u8,
     body: []const u8,
+    body_file: []const u8,
     headers: []const Header,
     capture: ?Capture,
     timeout_ms: u32,
@@ -47,6 +48,7 @@ const SpecWire = struct {
     method: []const u8 = "GET",
     path: []const u8 = "/",
     body: []const u8 = "",
+    body_file: []const u8 = "",
     headers: []const HeaderWire = &.{},
     capture: ?CaptureWire = null,
     timeout_ms: u32 = 2000,
@@ -84,6 +86,7 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
     _ = try parseTarget(wire.target);
     if (wire.path.len == 0 or wire.path.len > max_path_bytes) return error.InvalidRequestPath;
     if (wire.body.len > max_body_bytes) return error.RequestBodyTooLarge;
+    if (wire.body_file.len > 4096) return error.InvalidBodyFile;
     if (wire.timeout_ms < 50 or wire.timeout_ms > 5000) return error.InvalidTimeout;
     if (wire.headers.len > 16) return error.TooManyHeaders;
     const headers = try a.alloc(Header, wire.headers.len);
@@ -131,6 +134,7 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
         .method = method,
         .path = wire.path,
         .body = wire.body,
+        .body_file = wire.body_file,
         .headers = headers,
         .capture = capture,
         .timeout_ms = wire.timeout_ms,
@@ -375,6 +379,12 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !c
         return capability.Result.init(allocator, .failed, @errorName(err));
     };
     defer spec.deinit();
+    if (spec.body_file.len > 0) {
+        const body = std.Io.Dir.cwd().readFileAlloc(io, spec.body_file, spec.arena.allocator(), .limited(max_body_bytes)) catch |err| {
+            return capability.Result.init(allocator, .failed, @errorName(err));
+        };
+        spec.body = body;
+    }
     var response = probe(allocator, io, &spec) catch |err| {
         return capability.Result.init(allocator, .failed, @errorName(err));
     };
