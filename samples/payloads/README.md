@@ -9,7 +9,7 @@ so `tarfile.open` never returns; 3.7.9 raises `ReadError`.
 Generate it (deterministic):
 
 ```bash
-PocketRoot payload pax-loop samples/payloads/CVE-2019-20907.tar
+python samples/payloads/CVE-2019-20907.py
 ```
 
 Local verification with the pinned research images uses a parent process with its own

