@@ -375,6 +375,15 @@ fn appendEscaped(writer: *std.Io.Writer, text: []const u8) !void {
 /// failures are returned as succeeded with oracle=fail so the script can decide and fail
 /// with a message; transport and parse errors are failed results.
 pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !capability.Result {
+    return executeWithStop(allocator, io, payload, null);
+}
+
+pub fn executeWithStop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    payload: []const u8,
+    stop_check: ?StopCheck,
+) !capability.Result {
     var spec = parseSpec(allocator, payload) catch |err| {
         return capability.Result.init(allocator, .failed, @errorName(err));
     };
@@ -385,8 +394,8 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !c
         };
         spec.body = body;
     }
-    var response = probe(allocator, io, &spec) catch |err| {
-        return capability.Result.init(allocator, .failed, @errorName(err));
+    var response = probeWithStop(allocator, io, &spec, stop_check) catch |err| {
+        return capability.Result.init(allocator, if (err == error.Stopped) .cancelled else .failed, @errorName(err));
     };
     defer response.deinit();
 

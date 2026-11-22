@@ -459,6 +459,8 @@ PocketRoot exploit run-script samples/exploits/CVE-2024-38475/exploit.pk \\
 
 The gate binds the exact script bytes and target, consumes one single-use approval, writes
 `dsl-start`/`dsl-result` ledger events, and checks STOP before every workflow tick. The
+HTTP, UDP, TCP and AJP probes also receive the same stop check and poll it while waiting for
+a response, so an in-flight request is aborted. The
 evidence schema is `pocketroot.dsl.evidence.v1`, containing the script hash, target,
 approval id, audit entries and emitted findings. The command still uses `net.*` capabilities;
 the gate is around the whole script, not a CVE-specific branch.

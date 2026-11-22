@@ -50,16 +50,16 @@ pub const Backend = struct {
                     return capability.Result.init(allocator, .failed, "live scan unavailable");
                 };
                 if (http_probe.isHttpSpec(request.payload)) {
-                    return http_probe.execute(allocator, io, request.payload);
+                    return http_probe.executeWithStop(allocator, io, request.payload, request.stop);
                 }
                 if (udp_probe.isUdpSpec(request.payload)) {
-                    return udp_probe.execute(allocator, io, request.payload);
+                    return udp_probe.executeWithStop(allocator, io, request.payload, request.stop);
                 }
                 if (tcp_probe.isTcpSpec(request.payload)) {
-                    return tcp_probe.execute(allocator, io, request.payload);
+                    return tcp_probe.executeWithStop(allocator, io, request.payload, request.stop);
                 }
                 if (ajp_probe.isAjpSpec(request.payload)) {
-                    return ajp_probe.execute(allocator, io, request.payload);
+                    return ajp_probe.executeWithStop(allocator, io, request.payload, request.stop);
                 }
                 const text = try liveScan(allocator, io, request.payload);
                 defer allocator.free(text);

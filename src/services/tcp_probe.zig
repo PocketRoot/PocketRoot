@@ -100,6 +100,15 @@ fn appendEscaped(writer: *std.Io.Writer, data: []const u8) !void {
 }
 
 pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !capability.Result {
+    return executeWithStop(allocator, io, payload, null);
+}
+
+pub fn executeWithStop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    payload: []const u8,
+    stop_check: ?stop.Check,
+) !capability.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -113,8 +122,8 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !c
     if (wire.data.len > 4096 or wire.timeout_ms < 50 or wire.timeout_ms > 5000) {
         return capability.Result.init(allocator, .failed, "InvalidTcpSpec");
     }
-    const body = exchange(allocator, io, wire.target, wire.data, wire.timeout_ms, null) catch |err| {
-        return capability.Result.init(allocator, .failed, @errorName(err));
+    const body = exchange(allocator, io, wire.target, wire.data, wire.timeout_ms, stop_check) catch |err| {
+        return capability.Result.init(allocator, if (err == error.Stopped) .cancelled else .failed, @errorName(err));
     };
     defer allocator.free(body);
     var output = std.Io.Writer.Allocating.init(allocator);

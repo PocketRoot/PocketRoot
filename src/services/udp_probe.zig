@@ -152,15 +152,25 @@ pub fn exchange(
 }
 
 pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !capability.Result {
+    return executeWithStop(allocator, io, payload, null);
+}
+
+pub fn executeWithStop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    payload: []const u8,
+    stop_check: ?stop.Check,
+) !capability.Result {
     var spec = parseSpec(allocator, payload) catch |err| {
         return capability.Result.init(allocator, .failed, @errorName(err));
     };
     defer spec.deinit();
     const target = try parseTarget(spec.target);
-    const timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = std.Io.Duration.fromMilliseconds(spec.timeout_ms),
         .clock = .awake,
-    }) };
+    });
+    const timeout: std.Io.Timeout = .{ .deadline = deadline };
     var address = tcp_scan.resolveWithTimeout(io, target.host, target.port, timeout) catch |err| {
         return capability.Result.init(allocator, .failed, @errorName(err));
     };
@@ -180,10 +190,32 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, payload: []const u8) !c
     var bytes: usize = 0;
     var reason: []const u8 = "ok";
     var reason_buffer: [128]u8 = undefined;
-    const message = receiveDatagram(&socket, io, &response_buffer, timeout) catch |err| switch (err) {
-        error.Timeout => null,
-        else => return capability.Result.init(allocator, .failed, @errorName(err)),
-    };
+    var message: ?std.Io.net.IncomingMessage = null;
+    while (true) {
+        if (stop_check) |check| {
+            if (check.isStopped(check.context)) {
+                return capability.Result.init(allocator, .cancelled, "stopped");
+            }
+        }
+        const now = std.Io.Clock.Timestamp.now(io, .awake);
+        if (now.raw.nanoseconds >= deadline.raw.nanoseconds) break;
+        const slice_timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = std.Io.Duration.fromMilliseconds(100),
+            .clock = .awake,
+        }) };
+        message = receiveDatagram(&socket, io, &response_buffer, slice_timeout) catch |err| switch (err) {
+            error.Timeout => {
+                if (stop_check) |check| {
+                    if (check.isStopped(check.context)) {
+                        return capability.Result.init(allocator, .cancelled, "stopped");
+                    }
+                }
+                continue;
+            },
+            else => return capability.Result.init(allocator, .failed, @errorName(err)),
+        };
+        break;
+    }
     if (message) |received| {
         bytes = received.data.len;
         if (spec.expect_min_bytes) |minimum| {

@@ -19,6 +19,7 @@ pub const ActionState = enum {
     pending,
     succeeded,
     failed,
+    cancelled,
 };
 
 pub const Action = struct {
@@ -179,6 +180,7 @@ pub const Runner = struct {
             .pending => {},
             .succeeded => self.advance(),
             .failed => self.retryOrFail(action.max_attempts),
+            .cancelled => self.cancel(),
         }
     }
 

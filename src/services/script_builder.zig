@@ -962,6 +962,7 @@ pub const Executor = struct {
 
     pub fn setStopCheck(self: *Executor, check: ?stop.Check) void {
         self.stop_check = check;
+        self.engine.setStopCheck(check);
     }
 
     fn stopped(self: *const Executor) bool {

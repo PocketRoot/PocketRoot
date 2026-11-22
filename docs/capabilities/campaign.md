@@ -224,4 +224,4 @@ check` runs it with the rest of the suite.
 
 `campaign approve-script` binds `samples/exploits/<CVE>/exploit.pk` bytes and the target.
 `exploit run-script` consumes that approval, writes `dsl-start`/`dsl-result` ledger events
-and checks STOP between workflow ticks. See [exploit admission](../architecture/exploit-admission.md).
+and checks STOP between workflow ticks and during network reads. See [exploit admission](../architecture/exploit-admission.md).

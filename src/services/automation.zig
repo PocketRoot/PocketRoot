@@ -68,6 +68,7 @@ pub const Engine = struct {
     emitted: std.ArrayList(Emitted) = .empty,
     conditions: []const ConditionSpec = &.{},
     variables: std.StringHashMap([]const u8),
+    stop_check: ?capability.StopCheck = null,
 
     pub fn init(
         self: *Engine,
@@ -86,6 +87,11 @@ pub const Engine = struct {
         self.emitted = .empty;
         self.conditions = &.{};
         self.variables = std.StringHashMap([]const u8).init(self.capabilities.allocator);
+        self.stop_check = null;
+    }
+
+    pub fn setStopCheck(self: *Engine, check: ?capability.StopCheck) void {
+        self.stop_check = check;
     }
 
     pub fn deinit(self: *Engine) void {
@@ -171,6 +177,12 @@ pub const Engine = struct {
 
     fn executeAction(context: *anyopaque, action_id: []const u8, _: u16) !workflow.ActionState {
         const self: *Engine = @ptrCast(@alignCast(context));
+        if (self.stop_check) |check| {
+            if (check.isStopped(check.context)) {
+                self.last_status = .cancelled;
+                return .cancelled;
+            }
+        }
         const spec = self.findAction(action_id) orelse return error.UnknownAction;
         if (spec.fail) |message| {
             try self.emitted.append(self.capabilities.allocator, .{
@@ -225,6 +237,7 @@ pub const Engine = struct {
             .region = spec.region,
             .payload = payload,
             .active_authorized = spec.active_authorized,
+            .stop = self.stop_check,
         }) catch {
             self.last_status = if (self.capabilities.audit.entries.items.len == 0)
                 .failed
@@ -239,6 +252,7 @@ pub const Engine = struct {
         self.last_status = result.status;
         return switch (result.status) {
             .succeeded => .succeeded,
+            .cancelled => .cancelled,
             else => .failed,
         };
     }

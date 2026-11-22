@@ -52,6 +52,11 @@ pub const Operation = enum {
     }
 };
 
+pub const StopCheck = struct {
+    context: *anyopaque,
+    isStopped: *const fn (*anyopaque) bool,
+};
+
 pub const Request = struct {
     id: u64,
     subject: []const u8,
@@ -60,6 +65,7 @@ pub const Request = struct {
     region: []const u8 = "",
     payload: []const u8 = "",
     active_authorized: bool = false,
+    stop: ?StopCheck = null,
 };
 
 pub const Status = enum {
