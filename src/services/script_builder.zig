@@ -914,10 +914,12 @@ fn hasOption(options: []const script.Option, key: []const u8) bool {
 }
 
 const simulated_device = @import("../simulator/device.zig");
+const stop = @import("stop.zig");
 
 pub const Executor = struct {
     compiled: Compiled,
     engine: automation.Engine,
+    stop_check: ?stop.Check = null,
 
     /// Two-phase initialization keeps the engine's self pointer stable (moving an
     /// initialized Executor by value would leave the runner pointing at a stale copy).
@@ -949,6 +951,7 @@ pub const Executor = struct {
             };
         };
         self.engine.setConditions(self.compiled.conditions);
+        self.stop_check = null;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -957,10 +960,27 @@ pub const Executor = struct {
         self.* = undefined;
     }
 
+    pub fn setStopCheck(self: *Executor, check: ?stop.Check) void {
+        self.stop_check = check;
+    }
+
+    fn stopped(self: *const Executor) bool {
+        if (self.stop_check) |check| return check.isStopped(check.context);
+        return false;
+    }
+
     pub fn run(self: *Executor) !workflow.Status {
+        if (self.stopped()) {
+            self.engine.cancel();
+            return .cancelled;
+        }
         var status = try self.engine.tick(self.compiled.definition, 0);
         var ticks: usize = 0;
         while (!status.terminal()) {
+            if (self.stopped()) {
+                self.engine.cancel();
+                return .cancelled;
+            }
             if (ticks >= max_ticks) return error.TickBudgetExceeded;
             ticks += 1;
             status = try self.engine.tick(self.compiled.definition, 0);

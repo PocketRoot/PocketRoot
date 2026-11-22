@@ -219,3 +219,9 @@ The end-to-end test in `src/cli/main.zig` (`campaign surface, approval and stop 
 run`) covers: init with a 60 s TTL, arm, one feasible action from a synthetic v2 catalogue,
 approval, a successful dry run, denial on reuse, stop, and denial after stop. `zig build
 check` runs it with the rest of the suite.
+
+### DSL exploit approvals
+
+`campaign approve-script` binds `samples/exploits/<CVE>/exploit.pk` bytes and the target.
+`exploit run-script` consumes that approval, writes `dsl-start`/`dsl-result` ledger events
+and checks STOP between workflow ticks. See [exploit admission](../architecture/exploit-admission.md).

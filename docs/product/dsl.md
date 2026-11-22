@@ -444,3 +444,21 @@ end
 
 It is active, so run with `--authorize-active`; the handler still requires a live
 `campaign approve-adaptive` approval. See [adaptive](adaptive.md).
+
+## 12. Exploit execution gate
+
+`script run --live` is the lab/recon path: it executes the DSL without a campaign
+approval. An admitted exploit uses the generic gate instead:
+
+```bash
+PocketRoot campaign approve-script samples/exploits/CVE-2024-38475/exploit.pk \\
+    --target 127.0.0.1:8080 --reason "ticket DSL-1" --confirm cve-2024-38475
+PocketRoot exploit run-script samples/exploits/CVE-2024-38475/exploit.pk \\
+    --campaign .pocketroot --target 127.0.0.1:8080 --evidence dsl.json
+```
+
+The gate binds the exact script bytes and target, consumes one single-use approval, writes
+`dsl-start`/`dsl-result` ledger events, and checks STOP before every workflow tick. The
+evidence schema is `pocketroot.dsl.evidence.v1`, containing the script hash, target,
+approval id, audit entries and emitted findings. The command still uses `net.*` capabilities;
+the gate is around the whole script, not a CVE-specific branch.

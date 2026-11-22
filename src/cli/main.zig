@@ -68,12 +68,20 @@ fn run(init: std.process.Init) !void {
     }
 
     if (std.mem.eql(u8, args[1], "exploit")) {
-        if (args.len < 3 or !std.mem.eql(u8, args[2], "run")) {
-            try stdout.print("usage: exploit run <record.json> --campaign <dir> [--param k=v]\n", .{});
+        if (args.len < 3) {
+            try stdout.print("usage: exploit run|run-script ...\n", .{});
             return error.InvalidArguments;
         }
-        try runExploitCommand(arena, init.io, stdout, args[3..]);
-        return;
+        if (std.mem.eql(u8, args[2], "run")) {
+            try runExploitCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "run-script")) {
+            try runExploitScriptCommand(arena, init.io, stdout, args[3..]);
+            return;
+        }
+        try stdout.print("usage: exploit run|run-script ...\n", .{});
+        return error.InvalidArguments;
     }
 
     if (std.mem.eql(u8, args[1], "fleet")) {
@@ -1029,6 +1037,9 @@ fn printUsage(writer: *Io.Writer) !void {
         \\                       Verify the gate and consume the approval
         \\  reproduce <record.json> [--evidence <path>] [--json]
         \\  exploit run <record.json> --campaign <dir> [--param k=v] [--evidence <path>] [--json]
+        \\  exploit run-script <script.pk> --campaign <dir> --target <target>
+        \\                       Run an admitted DSL exploit under approval/STOP/ledger
+        \\  campaign approve-script <script.pk> --target <target> --reason <text> --confirm <name>
         \\  chain plan --observations <file> [--records <dir>] [--target <t>] [--out <plan.json>]
         \\  chain approve <plan.json> --reason <text> --confirm <CHAIN-ID>
         \\  chain run <plan.json> --campaign <dir> [--evidence <path>]
@@ -1072,6 +1083,8 @@ fn printUsage(writer: *Io.Writer) !void {
         \\  PocketRoot reproduce samples/reproductions/CVE-2021-41773/record.json --campaign .pocketroot --evidence repro.json
         \\  PocketRoot campaign approve-exploit samples/exploits/CVE-2018-7600/record.json --reason "ticket SEC-2" --confirm CVE-2018-7600
         \\  PocketRoot exploit run samples/exploits/CVE-2018-7600/record.json --campaign .pocketroot --param command=id --evidence exploit.json
+        \\  PocketRoot campaign approve-script samples/exploits/CVE-2024-38475/exploit.pk --target 127.0.0.1:8080 --reason "ticket DSL-1" --confirm cve-2024-38475
+        \\  PocketRoot exploit run-script samples/exploits/CVE-2024-38475/exploit.pk --campaign .pocketroot --target 127.0.0.1:8080 --evidence dsl.json
         \\  PocketRoot vulns ../PocketRootVulnerabilityDb/vulndb/catalog-v1.jsonl --protocol nmap samples/network/nmap-demo.xml
         \\  PocketRoot migrate samples/nfc/demo-iso14443-3a.nfc migrated/demo.nfc
         \\  PocketRoot analyze samples/infrared/demo-power.ir
@@ -2543,6 +2556,8 @@ test "usage lists the device host and audit commands" {
     try std.testing.expect(std.mem.indexOf(u8, usage, "chain run") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "chain adaptive") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-adaptive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "campaign approve-script") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage, "exploit run-script") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "fleet approve") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "fleet run") != null);
 }
@@ -2604,6 +2619,7 @@ fn runCampaignCommand(
     if (std.mem.eql(u8, sub, "approve-repro")) return runCampaignApproveRepro(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "approve-exploit")) return runCampaignApproveExploit(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "approve-adaptive")) return runCampaignApproveAdaptive(allocator, io, writer, raw[1..]);
+    if (std.mem.eql(u8, sub, "approve-script")) return runCampaignApproveScript(allocator, io, writer, raw[1..]);
     if (std.mem.eql(u8, sub, "run")) return runCampaignRun(allocator, io, writer, raw[1..]);
     try writer.print("unknown campaign command: {s}\n", .{sub});
     try printCampaignUsage(writer);
@@ -4896,4 +4912,132 @@ fn runFleetRunCommand(
     }
     if (json_output) try writer.writeAll(evidence.written());
     if (!all_succeeded) return error.CommandFailed;
+}
+
+fn runCampaignApproveScript(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var dir: []const u8 = campaign_default_dir;
+    var script_path: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var reason: ?[]const u8 = null;
+    var confirm: ?[]const u8 = null;
+    var operator: []const u8 = "operator";
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--dir") and index + 1 < raw.len) {
+            dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--target") and index + 1 < raw.len) {
+            target = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--reason") and index + 1 < raw.len) {
+            reason = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--confirm") and index + 1 < raw.len) {
+            confirm = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--operator") and index + 1 < raw.len) {
+            operator = raw[index + 1];
+            index += 2;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (script_path != null) return error.InvalidArguments;
+            script_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = script_path orelse {
+        try writer.print("usage: campaign approve-script <script.pk> --target <target> --reason <text> --confirm <script-name> [--dir <dir>]\n", .{});
+        return error.InvalidArguments;
+    };
+    const chosen_target = target orelse return error.InvalidArguments;
+    const why = reason orelse return error.InvalidArguments;
+    const typed = confirm orelse return error.InvalidArguments;
+    const data = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(PocketRoot.services.script.max_script_bytes)) catch |err| {
+        try writer.print("cannot read script: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer allocator.free(data);
+    var source = PocketRoot.services.script.parse(allocator, data) catch |err| {
+        try writer.print("invalid script: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer source.deinit();
+    if (!std.mem.eql(u8, typed, source.name)) {
+        try writer.print("confirmation does not match {s}; nothing approved\n", .{source.name});
+        return error.InvalidArguments;
+    }
+    var approval = PocketRoot.services.dsl_exploit.approve(allocator, io, path, dir, chosen_target, operator, why) catch |err| {
+        try writer.print("dsl approval refused: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer approval.deinit();
+    try writer.print("approved {s} on {s}\napproval {s} expires at {d}\n", .{
+        approval.action_id, approval.target, approval.id, approval.expires_at_unix,
+    });
+}
+
+fn runExploitScriptCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    writer: *Io.Writer,
+    raw: []const [:0]const u8,
+) !void {
+    var script_path: ?[]const u8 = null;
+    var campaign_dir: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var evidence_path: ?[]const u8 = null;
+    var json_output = false;
+    var index: usize = 0;
+    while (index < raw.len) {
+        if (std.mem.eql(u8, raw[index], "--campaign") and index + 1 < raw.len) {
+            campaign_dir = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--target") and index + 1 < raw.len) {
+            target = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--evidence") and index + 1 < raw.len) {
+            evidence_path = raw[index + 1];
+            index += 2;
+        } else if (std.mem.eql(u8, raw[index], "--json")) {
+            json_output = true;
+            index += 1;
+        } else if (std.mem.startsWith(u8, raw[index], "--")) {
+            return error.InvalidArguments;
+        } else {
+            if (script_path != null) return error.InvalidArguments;
+            script_path = raw[index];
+            index += 1;
+        }
+    }
+    const path = script_path orelse {
+        try writer.print("usage: exploit run-script <script.pk> --campaign <dir> --target <target> [--evidence <path>]\n", .{});
+        return error.InvalidArguments;
+    };
+    const dir = campaign_dir orelse return error.InvalidArguments;
+    const chosen_target = target orelse return error.InvalidArguments;
+    var execution = PocketRoot.services.dsl_exploit.run(allocator, io, path, dir, chosen_target) catch |err| {
+        try writer.print("dsl exploit failed: {s}\n", .{@errorName(err)});
+        return error.CommandFailed;
+    };
+    defer execution.deinit();
+    if (evidence_path) |file| {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = execution.evidence }) catch |err| {
+            try writer.print("cannot write evidence: {s}\n", .{@errorName(err)});
+            return error.CommandFailed;
+        };
+    }
+    if (json_output) {
+        try writer.writeAll(execution.evidence);
+    } else {
+        try writer.print("dsl {s}: {s} on {s}\napproval {s}\n", .{
+            execution.name, execution.status, execution.target, execution.approval_id,
+        });
+    }
+    if (!std.mem.eql(u8, execution.status, "succeeded")) return error.CommandFailed;
 }
