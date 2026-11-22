@@ -14,7 +14,7 @@ pub const max_path_bytes = 4096;
 pub const max_header_bytes = 16 * 1024;
 pub const max_target_bytes = 255;
 
-pub const Method = enum { get, post, head, put, delete };
+pub const Method = enum { get, post, head, put, delete, proppatch };
 
 pub const Header = struct { name: []const u8, value: []const u8 };
 pub const Capture = struct { name: []const u8, prefix: []const u8, suffix: []const u8 };
@@ -118,6 +118,7 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
         if (std.ascii.eqlIgnoreCase(wire.method, "HEAD")) break :blk Method.head;
         if (std.ascii.eqlIgnoreCase(wire.method, "PUT")) break :blk Method.put;
         if (std.ascii.eqlIgnoreCase(wire.method, "DELETE")) break :blk Method.delete;
+        if (std.ascii.eqlIgnoreCase(wire.method, "PROPPATCH")) break :blk Method.proppatch;
         return error.InvalidMethod;
     };
     if (wire.path[0] != '/' and !std.mem.eql(u8, wire.path, "*")) return error.InvalidRequestPath;
@@ -164,6 +165,7 @@ fn methodText(method: Method) []const u8 {
         .head => "HEAD",
         .put => "PUT",
         .delete => "DELETE",
+        .proppatch => "PROPPATCH",
     };
 }
 
