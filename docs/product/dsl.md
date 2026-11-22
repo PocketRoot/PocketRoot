@@ -448,7 +448,8 @@ It is active, so run with `--authorize-active`; the handler still requires a liv
 ## 12. Exploit execution gate
 
 `script run --live` is the lab/recon path: it executes the DSL without a campaign
-approval. An admitted exploit uses the generic gate instead:
+approval, and it refuses paths under `samples/exploits/`. An admitted exploit uses the
+generic gate instead:
 
 ```bash
 PocketRoot campaign approve-script samples/exploits/CVE-2024-38475/exploit.pk \\

@@ -1180,6 +1180,18 @@ fn enableAllKinds(backend: *PocketRoot.simulator.device.Backend) void {
 
 /// Runs a DSL script against the simulated backend. Library scripts are parsed in the
 /// order given, so a later library script may itself run an earlier one.
+fn isExploitSamplePath(path: []const u8) bool {
+    var iterator = std.mem.tokenizeAny(u8, path, "/\\");
+    var previous: ?[]const u8 = null;
+    while (iterator.next()) |component| {
+        if (previous) |parent| {
+            if (std.mem.eql(u8, parent, "samples") and std.mem.eql(u8, component, "exploits")) return true;
+        }
+        previous = component;
+    }
+    return false;
+}
+
 fn runScriptCommand(
     allocator: std.mem.Allocator,
     io: Io,
@@ -1187,6 +1199,10 @@ fn runScriptCommand(
     writer: *Io.Writer,
     request: ScriptRunRequest,
 ) !bool {
+    if (request.live and isExploitSamplePath(request.path)) {
+        try writer.print("admitted exploit scripts must use: exploit run-script <script.pk> --campaign <dir> --target <target>\n", .{});
+        return false;
+    }
     const max_bytes = PocketRoot.services.script.max_script_bytes;
     var entries: std.ArrayList(PocketRoot.services.script.LibraryEntry) = .empty;
 
@@ -2335,6 +2351,21 @@ test "script run arguments reject malformed options" {
 
     const unknown_flag = [_][:0]const u8{ "--nope", "main.pk" };
     try std.testing.expectError(error.InvalidScriptArgs, parseScriptRunArgs(std.testing.allocator, &unknown_flag));
+}
+
+test "script run --live refuses an admitted exploit path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const request = ScriptRunRequest{ .path = "samples/exploits/example.pk", .live = true };
+
+    var buffer: [1024]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    const ok = try runScriptCommand(std.testing.allocator, std.testing.io, tmp.dir, &writer, request);
+    try std.testing.expect(!ok);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exploit run-script") != null);
+    try std.testing.expect(isExploitSamplePath("./samples/exploits/example.pk"));
+    try std.testing.expect(isExploitSamplePath("F:\\work\\samples\\exploits\\example.pk"));
+    try std.testing.expect(!isExploitSamplePath("samples/scripts/live-scan.pk"));
 }
 
 test "script run inlines a library sub-script end to end" {
