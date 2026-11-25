@@ -11,7 +11,7 @@ The `18_CVE` lab is an external, read-only source of reproductions. PocketRoot a
 | HTTP redirect with a hostile `Location` value | `net.http` now exposes `location` and checks `expect_location_prefix`; `CVE-2025-4123/exploit.pk` |
 | Authorization boundary between two resources, Basic auth | `net.http` with headers; `CVE-2026-21721/exploit.pk` |
 | 700 MB request-body allocation / OOM | Deliberately not ported; needs a streaming-body primitive with explicit size and memory limits |
-| HTTP/2 state, header and framing defects | Not covered yet; needs a generic HTTP/2 frame client rather than a CVE branch |
+| HTTP/2 state, header and framing defects | `net.h2` sends the preface, SETTINGS and one caller-supplied HPACK HEADERS block, and reports RST/GOAWAY/DATA; `CVE-2026-41293/exploit.pk` is the first sample |
 | TLS SNI/cipher/pre-handshake defects | Not covered yet; needs client-side TLS/SNI controls |
 | Unix-domain socket permission bypass | Not covered yet; needs a generic `net.unix` transport |
 | Node.js/Python local runtime and policy defects | Out of scope for a network DSL; represented as local verification, not a `net.*` exploit |

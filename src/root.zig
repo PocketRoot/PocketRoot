@@ -57,6 +57,7 @@ pub const services = struct {
     pub const stop = @import("services/stop.zig");
     pub const admission = @import("services/admission.zig");
     pub const dsl_exploit = @import("services/dsl_exploit.zig");
+    pub const h2_probe = @import("services/h2_probe.zig");
     pub const tls_inspect = @import("services/tls_inspect.zig");
     pub const tcp_scan = @import("services/tcp_scan.zig");
     pub const tcp_probe = @import("services/tcp_probe.zig");
@@ -209,6 +210,7 @@ test {
         services.stop,
         services.admission,
         services.dsl_exploit,
+        services.h2_probe,
         services.tcp_probe,
         services.ajp_probe,
         services.tls_inspect,

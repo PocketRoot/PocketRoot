@@ -7,11 +7,11 @@
 | Protocol plugins | 13 |
 | Capability kinds | 21 |
 | Capability operations | 9 |
-| DSL verbs | 20 |
+| DSL verbs | 21 |
 | DSL packs | 5 |
-| Test blocks under src/ (declared) | 365 |
+| Test blocks under src/ (declared) | 366 |
 | CLI smoke invocations | 15 |
-| Sample files | 73 |
+| Sample files | 75 |
 | Catalogue v1 entries | 9 |
 | Catalogue v2 entries | 9064 |
 

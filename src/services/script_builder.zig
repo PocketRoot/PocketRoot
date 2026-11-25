@@ -59,6 +59,7 @@ pub const verb_map = [_]VerbMapping{
     .{ .verb = "net.udp", .kind = .network, .operation = .analyze },
     .{ .verb = "net.tcp", .kind = .network, .operation = .analyze },
     .{ .verb = "net.ajp", .kind = .network, .operation = .analyze },
+    .{ .verb = "net.h2", .kind = .network, .operation = .analyze },
     .{ .verb = "exploit.plan", .kind = .exploit, .operation = .analyze },
     .{ .verb = "exploit.execute", .kind = .exploit, .operation = .manage },
     .{ .verb = "exploit.adaptive", .kind = .exploit, .operation = .manage },
@@ -157,6 +158,7 @@ const Compiler = struct {
         const is_udp = std.mem.eql(u8, cap.verb, "net.udp");
         const is_tcp = std.mem.eql(u8, cap.verb, "net.tcp");
         const is_ajp = std.mem.eql(u8, cap.verb, "net.ajp");
+        const is_h2 = std.mem.eql(u8, cap.verb, "net.h2");
         const is_exploit_plan = std.mem.eql(u8, cap.verb, "exploit.plan");
         const is_exploit_execute = std.mem.eql(u8, cap.verb, "exploit.execute");
         const is_exploit_adaptive = std.mem.eql(u8, cap.verb, "exploit.adaptive");
@@ -170,6 +172,8 @@ const Compiler = struct {
             try tcpSpec(self.a, call.options)
         else if (is_ajp)
             try ajpSpec(self.a, call.options)
+        else if (is_h2)
+            try h2Spec(self.a, call.options)
         else if (is_exploit_plan)
             try exploitPlanSpec(self.a, call.options)
         else if (is_exploit_execute)
@@ -186,8 +190,8 @@ const Compiler = struct {
                 .kind = mapping.kind,
                 .operation = mapping.operation,
                 .region = try regionOption(cap, options.policy_region),
-                .payload = if (is_http or is_udp or is_tcp or is_ajp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) http_payload else payload_literal orelse "",
-                .payload_ref = if (is_http or is_udp or is_tcp or is_ajp or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) null else payload_ref,
+                .payload = if (is_http or is_udp or is_tcp or is_ajp or is_h2 or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) http_payload else payload_literal orelse "",
+                .payload_ref = if (is_http or is_udp or is_tcp or is_ajp or is_h2 or is_exploit_plan or is_exploit_execute or is_exploit_adaptive) null else payload_ref,
                 .path_ref = http_compiled.path_ref,
                 .body_ref = http_compiled.body_ref,
                 .active_authorized = options.authorize_active,
@@ -554,6 +558,48 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
         .path_ref = path_ref,
         .body_ref = body_ref,
     };
+}
+
+fn h2Spec(a: Allocator, options: []const script.Option) Error![]const u8 {
+    const target = (try literalString(options, "target")) orelse return error.InvalidOptionValue;
+    const headers_file = (try literalString(options, "headers_file")) orelse return error.InvalidOptionValue;
+    var stream_id: u32 = 1;
+    if (numberOption(options, "stream_id")) |value| {
+        if (value == 0 or value > 0x7fffffff) return error.InvalidOptionValue;
+        stream_id = @intCast(value);
+    }
+    var timeout_ms: u32 = 3000;
+    if (numberOption(options, "timeout")) |value| {
+        timeout_ms = value;
+    } else if (try literalString(options, "timeout")) |text| {
+        timeout_ms = parseHttpDuration(text) orelse return error.InvalidOptionValue;
+    }
+    if (timeout_ms < 50 or timeout_ms > 10000) return error.InvalidOptionValue;
+    const Wire = struct {
+        kind: []const u8,
+        target: []const u8,
+        headers_file: []const u8,
+        stream_id: u32,
+        timeout_ms: u32,
+        expect_body: []const u8,
+        expect_absent: []const u8,
+    };
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    var json: std.json.Stringify = .{
+        .writer = &output.writer,
+        .options = .{ .whitespace = .minified },
+    };
+    json.write(Wire{
+        .kind = "h2",
+        .target = target,
+        .headers_file = headers_file,
+        .stream_id = stream_id,
+        .timeout_ms = timeout_ms,
+        .expect_body = (try literalString(options, "expect_body")) orelse "",
+        .expect_absent = (try literalString(options, "expect_absent")) orelse "",
+    }) catch return error.OutOfMemory;
+    return output.toOwnedSlice();
 }
 
 fn tcpSpec(a: Allocator, options: []const script.Option) Error![]const u8 {
@@ -1683,4 +1729,22 @@ test "net.http compiles body_file" {
     const payload = compiled.actions[0].payload;
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"body_file\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "CVE-2019-20907.tar") != null);
+}
+
+test "net.h2 compiles a raw HPACK header file" {
+    var source = try script.parse(std.testing.allocator,
+        \\script "h2" do
+        \\    use "pack.net"
+        \\    cap h2 = net.h2
+        \\    step "s" do
+        \\        r = h2 { target = "127.0.0.1:8443", headers_file = "samples/payloads/CVE-2026-41293-headers.bin", expect_body = "XTEST=" }
+        \\    end
+        \\end
+    );
+    defer source.deinit();
+    var compiled = try compile(std.testing.allocator, &source, .{});
+    defer compiled.deinit();
+    const payload = compiled.actions[0].payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"kind\":\"h2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "CVE-2026-41293-headers.bin") != null);
 }

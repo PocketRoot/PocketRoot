@@ -77,7 +77,7 @@ Every verb becomes a `capability.Request` (see
 
 | DSL verb | Kind and operation | Active authorisation |
 |---|---|---|
-| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `net.tcp`, `net.ajp`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
+| `subghz.read`, `nfc.read`, `ir.receive`, `lfrfid.read`, `ibutton.read`, `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `net.tcp`, `net.ajp`, `net.h2`, `fs.read` | matching kind with `read`/`capture`/`analyze` | no |
 | `subghz.transmit` | `subghz` + `transmit` | yes, with matching region |
 | `ir.transmit` | `infrared` + `transmit` | yes |
 | `nfc.emulate` | `nfc` + `emulate` | yes |
@@ -94,7 +94,7 @@ one pack:
 | `pack.rf` | `subghz.read`, `subghz.transmit`, `lfrfid.read`, `ibutton.read` |
 | `pack.nfc` | `nfc.read`, `nfc.emulate` |
 | `pack.ir` | `ir.receive`, `ir.transmit` |
-| `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `net.tcp`, `net.ajp` |
+| `pack.net` | `net.capture`, `net.tls`, `net.scan`, `net.http`, `net.udp`, `net.tcp`, `net.ajp`, `net.h2` |
 | `pack.exploit` | `exploit.plan`, `exploit.execute`, `exploit.adaptive` |
 | `pack.fs` | `fs.read`, `fs.write` |
 
@@ -111,6 +111,7 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 | `net.udp` | one datagram: `target`, `data`, `timeout`, `expect_min_bytes`, `expect_body`, `expect_absent`; the result binds `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason` |
 | `net.tcp` | one raw TCP payload: `target`, `data`, `timeout`; the result binds `bytes`, `body_prefix` |
 | `net.ajp` | one AJP13 request: `target`, `method`, `uri`, `server_port`, `attributes` (`name=value;name=value`), `timeout`; the result binds `status`, `bytes`, `body_prefix` |
+| `net.h2` | one HTTP/2 request: `target`, `headers_file` (raw HPACK block), `stream_id`, `timeout`, `expect_body`, `expect_absent`; the result binds `frames`, `rst_stream`, `goaway`, `body_bytes`, `body_prefix`, `oracle`, `oracle_reason` |
 | `exploit.plan` | passive chain analysis: `observations` or `surface`, `records`, `target`; the result binds the `pocketroot.chain.v1` JSON |
 | `exploit.execute` | active, campaign-gated chain execution: `plan`, `campaign`; the result binds `pocketroot.chain.evidence.v1` |
 | `exploit.adaptive` | active, campaign-gated output-driven goal: `goal`, `campaign`; the result binds `pocketroot.adaptive.evidence.v1` |

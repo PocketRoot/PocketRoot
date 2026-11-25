@@ -6,6 +6,7 @@ const http_probe = @import("../services/http_probe.zig");
 const udp_probe = @import("../services/udp_probe.zig");
 const tcp_probe = @import("../services/tcp_probe.zig");
 const ajp_probe = @import("../services/ajp_probe.zig");
+const h2_probe = @import("../services/h2_probe.zig");
 const exploit_plan = @import("../services/exploit_plan.zig");
 const exploit_execute = @import("../services/exploit_execute.zig");
 
@@ -49,6 +50,9 @@ pub const Backend = struct {
                 const io = self.io orelse {
                     return capability.Result.init(allocator, .failed, "live scan unavailable");
                 };
+                if (h2_probe.isH2Spec(request.payload)) {
+                    return h2_probe.executeWithStop(allocator, io, request.payload, request.stop);
+                }
                 if (http_probe.isHttpSpec(request.payload)) {
                     return http_probe.executeWithStop(allocator, io, request.payload, request.stop);
                 }
