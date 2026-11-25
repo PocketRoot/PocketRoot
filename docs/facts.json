@@ -5,9 +5,9 @@
   "operations": 9,
   "dsl_verbs": 20,
   "dsl_packs": 5,
-  "test_blocks": 364,
+  "test_blocks": 365,
   "smoke_checks": 15,
-  "sample_files": 70,
+  "sample_files": 73,
   "catalogue_v1": 9,
   "catalogue_v2": 9064
 }

@@ -284,14 +284,14 @@ const verbs = [_]VerbInfo{
 };
 
 const option_keys = [_][]const u8{
-    "region",             "on_error",           "into",           "payload",      "confirm",
-    "tag",                "note",               "path",           "timeout",      "message",
-    "severity",           "target",             "method",         "body",         "expect_status",
-    "expect_body",        "expect_absent",      "headers",        "data",         "expect_min_bytes",
-    "capture_name",       "capture_prefix",     "capture_suffix", "observations", "surface",
-    "records",            "plan",               "campaign",       "goal",         "body_file",
-    "uri",                "server_port",        "attributes",     "path_suffix",  "body_ref",
-    "capture_prefix_hex", "capture_suffix_hex",
+    "region",             "on_error",           "into",                   "payload",      "confirm",
+    "tag",                "note",               "path",                   "timeout",      "message",
+    "severity",           "target",             "method",                 "body",         "expect_status",
+    "expect_body",        "expect_absent",      "headers",                "data",         "expect_min_bytes",
+    "capture_name",       "capture_prefix",     "capture_suffix",         "observations", "surface",
+    "records",            "plan",               "campaign",               "goal",         "body_file",
+    "uri",                "server_port",        "attributes",             "path_suffix",  "body_ref",
+    "capture_prefix_hex", "capture_suffix_hex", "expect_location_prefix",
 };
 
 fn verbInfo(name: []const u8) ?VerbInfo {

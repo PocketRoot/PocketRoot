@@ -9,9 +9,9 @@
 | Capability operations | 9 |
 | DSL verbs | 20 |
 | DSL packs | 5 |
-| Test blocks under src/ (declared) | 364 |
+| Test blocks under src/ (declared) | 365 |
 | CLI smoke invocations | 15 |
-| Sample files | 70 |
+| Sample files | 73 |
 | Catalogue v1 entries | 9 |
 | Catalogue v2 entries | 9064 |
 

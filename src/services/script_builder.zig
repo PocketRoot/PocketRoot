@@ -526,6 +526,7 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
         expect_status: ?u16,
         expect_body: []const u8,
         expect_absent: []const u8,
+        expect_location_prefix: []const u8,
     };
     var output = std.Io.Writer.Allocating.init(a);
     defer output.deinit();
@@ -546,6 +547,7 @@ fn httpSpec(a: Allocator, options: []const script.Option) Error!HttpCompiled {
         .expect_status = expect_status,
         .expect_body = (try literalString(options, "expect_body")) orelse "",
         .expect_absent = (try literalString(options, "expect_absent")) orelse "",
+        .expect_location_prefix = (try literalString(options, "expect_location_prefix")) orelse "",
     }) catch return error.OutOfMemory;
     return .{
         .payload = try output.toOwnedSlice(),

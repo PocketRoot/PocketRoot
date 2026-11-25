@@ -32,6 +32,7 @@ pub const Spec = struct {
     expect_status: ?u16,
     expect_body: []const u8,
     expect_absent: []const u8,
+    expect_location_prefix: []const u8,
 
     pub fn deinit(self: *Spec) void {
         self.arena.deinit();
@@ -55,16 +56,21 @@ const SpecWire = struct {
     expect_status: ?u16 = null,
     expect_body: []const u8 = "",
     expect_absent: []const u8 = "",
+    expect_location_prefix: []const u8 = "",
 };
 
 pub const Response = struct {
     allocator: std.mem.Allocator,
     status: u16,
     status_line: []u8,
+    headers: []u8,
+    location: []u8,
     body: []u8,
 
     pub fn deinit(self: *Response) void {
         self.allocator.free(self.status_line);
+        self.allocator.free(self.headers);
+        self.allocator.free(self.location);
         self.allocator.free(self.body);
         self.* = undefined;
     }
@@ -141,6 +147,7 @@ pub fn parseSpec(allocator: std.mem.Allocator, data: []const u8) !Spec {
         .expect_status = wire.expect_status,
         .expect_body = wire.expect_body,
         .expect_absent = wire.expect_absent,
+        .expect_location_prefix = wire.expect_location_prefix,
     };
 }
 
@@ -289,10 +296,11 @@ fn parseResponse(allocator: std.mem.Allocator, raw: []const u8) !Response {
     const status = std.fmt.parseInt(u16, status_text, 10) catch return error.InvalidHttpResponse;
     if (status < 100 or status > 599) return error.InvalidHttpResponse;
 
-    const headers = raw[status_end + 1 .. headers_end];
+    const raw_headers = raw[status_end + 1 .. headers_end];
+    var location: []const u8 = "";
     var content_length: ?usize = null;
     var chunked = false;
-    var lines = std.mem.splitScalar(u8, headers, '\n');
+    var lines = std.mem.splitScalar(u8, raw_headers, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
@@ -305,6 +313,8 @@ fn parseResponse(allocator: std.mem.Allocator, raw: []const u8) !Response {
             std.ascii.indexOfIgnoreCase(value, "chunked") != null)
         {
             chunked = true;
+        } else if (std.ascii.eqlIgnoreCase(name, "Location")) {
+            location = value;
         }
     }
 
@@ -319,10 +329,16 @@ fn parseResponse(allocator: std.mem.Allocator, raw: []const u8) !Response {
     errdefer allocator.free(body);
     if (body.len > max_body_bytes) return error.ResponseBodyTooLarge;
 
+    const owned_headers = try allocator.dupe(u8, raw_headers);
+    errdefer allocator.free(owned_headers);
+    const owned_location = try allocator.dupe(u8, location);
+    errdefer allocator.free(owned_location);
     return .{
         .allocator = allocator,
         .status = status,
         .status_line = try allocator.dupe(u8, status_line),
+        .headers = owned_headers,
+        .location = owned_location,
         .body = body,
     };
 }
@@ -416,6 +432,10 @@ pub fn executeWithStop(
         oracle_pass = false;
         reason = "forbidden body marker present";
     }
+    if (oracle_pass and spec.expect_location_prefix.len > 0 and !std.mem.startsWith(u8, response.location, spec.expect_location_prefix)) {
+        oracle_pass = false;
+        reason = "location prefix absent";
+    }
 
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
@@ -423,7 +443,11 @@ pub fn executeWithStop(
     try writer.print("status={d}\n", .{response.status});
     try writer.print("status_line={s}\n", .{response.status_line});
     try writer.print("body_bytes={d}\n", .{response.body.len});
-    try writer.writeAll("body_prefix=");
+    try writer.writeAll("headers_prefix=");
+    try appendEscaped(writer, response.headers[0..@min(response.headers.len, 512)]);
+    try writer.writeAll("\nlocation=");
+    try appendEscaped(writer, response.location);
+    try writer.writeAll("\nbody_prefix=");
     try appendEscaped(writer, response.body);
     try writer.writeAll("\ncaptured=");
     var capture_found = false;
@@ -583,4 +607,24 @@ test "http spec rejects header injection" {
     try std.testing.expectError(error.InvalidHeader, parseSpec(std.testing.allocator,
         \\{"kind":"http","target":"127.0.0.1:80","headers":[{"name":"X-Test: evil","value":"1"}]}
     ));
+}
+
+test "http probe exposes Location and checks its prefix" {
+    var listen_address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try listen_address.listen(std.testing.io, .{});
+    defer server.deinit(std.testing.io);
+    var group: std.Io.Group = .init;
+    defer group.cancel(std.testing.io);
+    const response = "HTTP/1.1 302 Found\r\nLocation: /\\evil.example/?/../../\r\nContent-Length: 0\r\n\r\n";
+    try group.concurrent(std.testing.io, serveOne, .{ &server, std.testing.io, response });
+    const spec = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{"kind":"http","target":"127.0.0.1:{d}","path":"/public/..%2F%5cevil.example%2F%3f%2F..%2F..","expect_status":302,"expect_location_prefix":"/\\evil.example"}}
+    , .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(spec);
+    var result = try execute(std.testing.allocator, std.testing.io, spec);
+    defer result.deinit();
+    try group.await(std.testing.io);
+    try std.testing.expectEqual(capability.Status.succeeded, result.status);
+    try std.testing.expect(std.mem.indexOf(u8, result.data, "location=/\\evil.example") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.data, "oracle=pass") != null);
 }

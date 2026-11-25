@@ -107,13 +107,14 @@ with `UnknownPack`; a verb without a pack fails with `UnknownVerb`.
 |---|---|
 | `on_error` | `"abort"`, `"continue"` or `"retry(n)"`; retry reuses the workflow attempt counter |
 | `fail "message"` | a deliberate failure: emits an `error` finding, fails the step and stops the run |
-| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `path_suffix`, `headers`, `body`, `body_file`, `body_ref`, `timeout`, `capture_name`, `capture_prefix`, `capture_suffix`, `capture_prefix_hex`, `capture_suffix_hex`, `expect_status`, `expect_body`, `expect_absent`; the result binds `status`, `status_line`, `body_bytes`, `body_prefix`, `captured`, `capture_found`, `oracle`, `oracle_reason` |
+| `net.http` | raw HTTP/1.1 request: `target`, `method`, `path`, `path_suffix`, `headers`, `body`, `body_file`, `body_ref`, `timeout`, `capture_name`, `capture_prefix`, `capture_suffix`, `capture_prefix_hex`, `capture_suffix_hex`, `expect_status`, `expect_body`, `expect_absent`, `expect_location_prefix`; the result binds `status`, `status_line`, `headers_prefix`, `location`, `body_bytes`, `body_prefix`, `captured`, `capture_found`, `oracle`, `oracle_reason` |
 | `net.udp` | one datagram: `target`, `data`, `timeout`, `expect_min_bytes`, `expect_body`, `expect_absent`; the result binds `bytes`, `ratio`, `body_prefix`, `oracle`, `oracle_reason` |
 | `net.tcp` | one raw TCP payload: `target`, `data`, `timeout`; the result binds `bytes`, `body_prefix` |
 | `net.ajp` | one AJP13 request: `target`, `method`, `uri`, `server_port`, `attributes` (`name=value;name=value`), `timeout`; the result binds `status`, `bytes`, `body_prefix` |
 | `exploit.plan` | passive chain analysis: `observations` or `surface`, `records`, `target`; the result binds the `pocketroot.chain.v1` JSON |
 | `exploit.execute` | active, campaign-gated chain execution: `plan`, `campaign`; the result binds `pocketroot.chain.evidence.v1` |
 | `exploit.adaptive` | active, campaign-gated output-driven goal: `goal`, `campaign`; the result binds `pocketroot.adaptive.evidence.v1` |
+| `expect_*` | These options feed the **oracle**; they do not fail the action. An admitted script must check the result, e.g. `if r.oracle ~= "pass" then fail "..." end`. |
 | Scoping | `sig = ...` is local to the step; crossing steps requires `out <name>` |
 | Variables | A successful call binds its result payload as `name` and, for each `key=value` line, as `name.key` |
 | References | `payload`, `severity`, `message`, `tag` and `note` accept a variable reference. The root must be visible at parse time; a path that is visible but has no runtime field fails the step with `UnresolvedReference` instead of sending or emitting an empty value |
